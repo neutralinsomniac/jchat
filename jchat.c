@@ -507,6 +507,10 @@ void *reader(void *arg)
             } else if (strncmp(CLEAR_HISTORY_CMD, msg_assembled, CMD_SIZE) ==  0) {
                 pthread_mutex_lock(&msg_mutex);
                 add_new_message(MSG_HISTORY_CLEARED, STATUS);
+                if (clear && pending_msg > 0) {
+                    pending_msg = 0
+                    update_prompt();
+                }
                 update_display();
                 if (current_urgent_mode != URGENT_NONE) {
                     printf("%s", VISIBLE_BEEP);
@@ -515,7 +519,7 @@ void *reader(void *arg)
                 pthread_mutex_unlock(&msg_mutex);
             } else if (strncmp(REDACT_CMD, msg_assembled, CMD_SIZE) == 0) {
                 pthread_mutex_lock(&msg_mutex);
-                if (clear && pending_msg >  0) {
+                if (clear && pending_msg > 0) {
                     pending_msg--;
                     update_prompt();
                 }
