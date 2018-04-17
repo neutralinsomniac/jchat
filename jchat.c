@@ -508,7 +508,7 @@ void *reader(void *arg)
                 pthread_mutex_lock(&msg_mutex);
                 add_new_message(MSG_HISTORY_CLEARED, STATUS);
                 if (clear && pending_msg > 0) {
-                    pending_msg = 0
+                    pending_msg = 0;
                     update_prompt();
                 }
                 update_display();
