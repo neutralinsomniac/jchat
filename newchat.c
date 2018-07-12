@@ -83,6 +83,7 @@ struct client_state {
     int transient_mode; /* is transient mode enabled? */
     int urgent_mode; /* urgent mode */
     int num_pending_msg;
+    int should_exit;
 };
 
 /* this is what gets passed on the wire */
@@ -102,16 +103,20 @@ struct node {
 
 
 pthread_mutex_t msg_mutex;
-pthread_t pt_user_input, pt_server_processing;
+pthread_t pt_user_input, pt_server_processing, pt_server;
 
 struct node *root = NULL;
 struct node *tail = NULL;
 struct winsize w;
 
-struct client_state g_client_state = {0};
+static struct client_state g_client_state = {0};
 
 void update_display();
 void clear_display();
+
+void ignore_user1(int signum)
+{
+}
 
 void clear_history()
 {
@@ -327,10 +332,11 @@ void window_resized(int signum)
     pthread_mutex_unlock(&msg_mutex);
 }
 
-void server(const struct sockaddr_un * sock)
+void *server_thread(void *arg)
 {
     int fd, client_fd;
     struct sockaddr_un client_sock;
+    struct sockaddr_un *sock = (struct sockaddr_un *)arg;
     socklen_t client_sock_len;
     struct pollfd fds[MAX_USERS+1];
     int num_fds;
@@ -369,7 +375,6 @@ void server(const struct sockaddr_un * sock)
         poll(fds, num_fds, -1);
         /* check new connection fd */
         if (fds[0].revents & POLLIN) {
-            printf("got connection!\n");
             client_fd = accept(fd, (struct sockaddr *)&client_sock, &client_sock_len);
 
             /* non blocking socket */
@@ -490,7 +495,8 @@ void server(const struct sockaddr_un * sock)
             }
         }
     }
-    return;
+
+    pthread_exit(0);
 }
 
 void write_msg(int fd, struct msg *msg)
@@ -507,23 +513,24 @@ void write_msg(int fd, struct msg *msg)
     }
 }
 
-void read_msg(int fd, struct msg *msg)
+int read_msg(int fd, struct msg *msg)
 {
-	int total_read = 0, bytes_read;
-	while (total_read < sizeof(struct msg)) {
-		bytes_read = read(fd, ((char *)msg) + total_read, sizeof(struct msg) - total_read);
-		if (bytes_read > 0) {
-			total_read += bytes_read;
-		} else {
-			break;
-		}
-	}
+    int total_read = 0, bytes_read;
+    while (total_read < sizeof(struct msg)) {
+        bytes_read = read(fd, ((char *)msg) + total_read, sizeof(struct msg) - total_read);
+        if (bytes_read > 0) {
+            total_read += bytes_read;
+        } else {
+            break;
+        }
+    }
+
+    return total_read;
 }
 
 void *user_input_thread(void *arg)
 {
     int fd = *(int *)arg;
-    printf("hello from user_input_thread! fd: %u\n", fd);
     struct msg msg = {0};
     char *rl_str = NULL;
 
@@ -535,13 +542,25 @@ void *user_input_thread(void *arg)
     memcpy(g_client_state.nick, rl_str, NICK_SIZE-1);
     free(rl_str);
 
-	strncpy(msg.nick, g_client_state.nick, NICK_SIZE-1);
+    strncpy(msg.nick, g_client_state.nick, NICK_SIZE-1);
     msg.type = MSG_JOIN;
     msg.time = time(NULL);
     write_msg(fd, &msg);
 
+    using_history();
+    clear_display();
+    pthread_mutex_lock(&msg_mutex);
+    update_display();
+    pthread_mutex_unlock(&msg_mutex);
+
     /* main msg processing loop */
-    while (rl_str = readline(g_client_state.prompt)) {
+    while ((rl_str = readline(g_client_state.prompt)) != NULL) {
+        if (rl_str[0] == '\0') {
+            pthread_mutex_lock(&msg_mutex);
+            update_display();
+            pthread_mutex_unlock(&msg_mutex);
+            continue;
+        }
         memset(&msg, 0, sizeof(struct msg));
         strncpy(msg.msg, rl_str, MSG_SIZE-1);
         msg.time = time(NULL);
@@ -550,8 +569,12 @@ void *user_input_thread(void *arg)
         free(rl_str);
     }
 
-    /* this demonstrates that the fd doesn't hangup until after both threads (user input and server processing) have exited */
     printf("user_input_thread() exiting\n");
+    memset(&msg, 0, sizeof(struct msg));
+    msg.type = MSG_QUIT;
+    write_msg(fd, &msg);
+    g_client_state.should_exit = 1;
+    pthread_exit(0);
 }
 
 void *server_processing_thread(void *arg)
@@ -560,13 +583,16 @@ void *server_processing_thread(void *arg)
 
     struct msg msg = {0};
 
-    while (1) {
-    	read_msg(fd, &msg);
+    while (!g_client_state.should_exit) {
+        if (read_msg(fd, &msg) != sizeof(struct msg)) {
+            printf("server hung up!\n");
+            break;
+        }
         pthread_mutex_lock(&msg_mutex);
         add_new_message(&msg);
         if (g_client_state.clear_mode) {
             g_client_state.num_pending_msg++;
-            update_prompt();
+            //update_prompt();
         }
         update_display();
         if (g_client_state.urgent_mode != URGENT_NONE) {
@@ -575,9 +601,9 @@ void *server_processing_thread(void *arg)
         }
         pthread_mutex_unlock(&msg_mutex);
     }
-    printf("hello from server! fd: %u\n", fd);
 
-    printf("writer exiting\n");
+    g_client_state.should_exit = 1;
+    pthread_exit(0);
 }
 
 void client(const struct sockaddr_un *sock)
@@ -592,6 +618,9 @@ void client(const struct sockaddr_un *sock)
     new_action.sa_handler = window_resized;
     sigaction(SIGWINCH, &new_action, NULL);
 
+    new_action.sa_handler = ignore_user1;
+    sigaction(SIGUSR1, &new_action, NULL);
+
     /* connect to socket to get fd */
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -599,11 +628,14 @@ void client(const struct sockaddr_un *sock)
         exit(EXIT_FAILURE);
     }
 
-    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && errno == ENOENT && counter < 5) {
-        printf("waiting to connect...\n");
-        sleep(1);
+    printf("waiting to connect...\n");
+
+    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && errno == ENOENT && counter < 10) {
+        sleep(0.1f);
         counter++;
     }
+
+    clear_display();
 
     if (fd < 0) {
         perror("failed to connect");
@@ -611,16 +643,20 @@ void client(const struct sockaddr_un *sock)
     }
 
     /* init state */
-    strncpy(g_client_state.prompt, "> ", PROMPT_SIZE);
     g_client_state.urgent_mode = URGENT_ALL;
     g_client_state.num_pending_msg = 0;
 
     /* need to create threads for user input + server processing */
     pthread_create(&pt_user_input, NULL, &user_input_thread, (void*)&fd);
-    pthread_create(&pt_server_processing, NULL, &server_processing_thread, (void*)&fd) ;
+    pthread_create(&pt_server_processing, NULL, &server_processing_thread, (void*)&fd);
 
-    pthread_join(pt_server_processing, &res);
-    pthread_join(pt_user_input, &res);
+    while (!g_client_state.should_exit) {
+        sleep(1);
+    }
+
+    // one of our threads signaled exit; signal our other thread(s) to exit
+    pthread_kill(pt_server_processing, SIGUSR1);
+    pthread_kill(pt_user_input, SIGUSR1);
 
     return;
 }
@@ -628,6 +664,7 @@ void client(const struct sockaddr_un *sock)
 int main(int argc, char **argv)
 {
     int is_server = 0;
+    void *res;
     char comms_dir_template[] = COMMS_DIR_TEMPLATE;
     char sockpath[sizeof(COMMS_DIR_TEMPLATE) + sizeof(JCHAT_SOCK_FILENAME)];
 
@@ -653,13 +690,15 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
         snprintf(sockpath, sizeof(sockpath), comms_dir_template);
-        printf("key: %s\n", &comms_dir_template[11]);
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "%s> ", &comms_dir_template[11]);
+        //printf("key: %s\n", &comms_dir_template[11]);
     } else {
         if (strlen(response) != 6) {
             printf("invalid key, goodbye!\n");
             exit(EXIT_FAILURE);
         } else {
           snprintf(sockpath, sizeof(sockpath), "/tmp/comms.%s", response);
+          snprintf(g_client_state.prompt, PROMPT_SIZE, "> ");
         }
     }
 
@@ -671,14 +710,18 @@ int main(int argc, char **argv)
     snprintf(sock.sun_path, sizeof(sock.sun_path), sockpath);
 
     if (is_server) {
-        if (fork()) {
-            /* parent */
-            server(&sock);
-        }
-        /* child continues to become a client as well */
+        pthread_create(&pt_server, NULL, &server_thread, &sock);
     }
 
+    clear_display();
+    fflush(stdout);
+
     client(&sock);
+
+    if (is_server) {
+        printf("server is still running... [ctrl-c] to stop\n");
+        pthread_join(pt_server, &res);
+    }
 
     return 0;
 }
