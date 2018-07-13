@@ -4,8 +4,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
-#include <readline/history.h>
 #include <readline/readline.h>
+#include <readline/history.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -148,9 +148,6 @@ int read_msg(int fd, struct msg *msg)
         if (bytes_read > 0) {
             total_read += bytes_read;
         } else {
-            if (bytes_read == -1) {
-                perror("read");
-            }
             break;
         }
     }
@@ -224,7 +221,7 @@ void copy_msg(struct node *dst, struct msg *src)
     strncpy(dst->msg.msg, src->msg, MSG_SIZE);
     strncpy(dst->msg.nick, src->nick, NICK_SIZE);
     dst->msg.time = src->time;
-    if (strncmp(src->nick, g_client_state.nick, NICK_SIZE) == 0) {
+    if (src->type == MSG_NORMAL && strncmp(src->nick, g_client_state.nick, NICK_SIZE) == 0) {
         dst->msg.type = MSG_OWN;
     } else {
         dst->msg.type = src->type;
@@ -463,7 +460,6 @@ void *server_thread(void *arg)
                                 }
                                 /* did we survive the duplicate nick check? */
                                 if (msg.type == MSG_JOIN) {
-                                    printf("accepting user %s\n", msg.nick);
                                     snprintf(nicks[i], NICK_SIZE-1, "%s", msg.nick);
                                     /* ensure null-terminated */
                                     snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i]);
@@ -507,11 +503,9 @@ void *server_thread(void *arg)
             }
 
             if (fds[i].revents & POLLHUP) {
-                printf("fd %d hungup; removing from list\n", i);
                 remove = 1;
             }
             if (fds[i].revents & POLLERR || fds[i].revents & POLLNVAL) {
-                printf("problem with fd %u, removing from list\n", i);
                 remove = 1;
             }
             if (remove) {
@@ -543,9 +537,16 @@ void *user_input_thread(void *arg)
         g_client_state.join_state = JOIN_PENDING;
 
         /* first, prompt for nick */
-        do {
-            rl_str = readline("enter nick: ");
-        } while (rl_str == NULL);
+        rl_str = readline("enter nick: ");
+
+        if (rl_str == NULL) {
+            g_client_state.should_exit = 1;
+            pthread_exit(0);
+        }
+
+        if (rl_str[0] == '\0') {
+            continue;
+        }
 
         strncpy(msg.nick, rl_str, NICK_SIZE-1);
         free(rl_str);
@@ -554,14 +555,19 @@ void *user_input_thread(void *arg)
         write_msg(fd, &msg);
 
         while (g_client_state.join_state == JOIN_PENDING) {
-            sleep(0.1f);
+            sleep(0.5f);
         }
 
         if (g_client_state.join_state == JOINED) {
             break;
         }
 
+        printf("%s", SAVE_CURSOR);
+        printf("%s", LINE_UP);
+        printf("%s", CLEAR_LINE);
         printf("nick taken! try again\n");
+        printf("%s", RESTORE_CURSOR);
+        printf("%s", CLEAR_LINE);
     }
 
     memcpy(g_client_state.nick, msg.nick, NICK_SIZE-1);
@@ -584,12 +590,13 @@ void *user_input_thread(void *arg)
         msg.time = time(NULL);
         msg.type = MSG_NORMAL;
         write_msg(fd, &msg);
+		add_history(rl_str);
         free(rl_str);
         printf("%s", CLEAR_LINE);
     }
 
-    printf("user_input_thread() exiting\n");
     memset(&msg, 0, sizeof(struct msg));
+    msg.time = time(NULL);
     msg.type = MSG_QUIT;
     write_msg(fd, &msg);
     g_client_state.should_exit = 1;
@@ -604,7 +611,6 @@ void *server_processing_thread(void *arg)
 
     while (!g_client_state.should_exit) {
         if (read_msg(fd, &msg) != sizeof(struct msg)) {
-            printf("server hung up!\n");
             break;
         }
 
@@ -750,17 +756,16 @@ int main(int argc, char **argv)
 
     client(&sock);
 
-    if (is_server) {
-        printf("server is still running... [enter] to stop\n");
-        readline(NULL);
-    }
-
     // reset terminal
     printf("%s", RESET_TERM);
     printf("%s", CLEAR_SCROLLBACK);
     printf("%s", CLEAR_SCREEN);
 
+    fflush(stdout);
+
     if (is_server) {
+        printf("server is still running... [enter] to stop\n");
+        readline(NULL);
         unlink(sockpath);
         rmdir(comms_dir_template);
     }
