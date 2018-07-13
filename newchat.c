@@ -67,7 +67,14 @@ enum msg_type {
     MSG_OWN,
     MSG_NORMAL,
     MSG_JOIN,
+    MSG_JOIN_REJECTED,
     MSG_QUIT
+};
+
+enum join_state {
+    JOIN_PENDING = 0,
+    JOIN_REJECTED,
+    JOINED
 };
 
 enum urgent_type {
@@ -77,6 +84,7 @@ enum urgent_type {
 };
 
 struct client_state {
+    enum join_state join_state;
     char nick[NICK_SIZE]; /* own nick */
     char prompt[PROMPT_SIZE]; /* custom prompt string */
     int clear_mode; /* is clear mode enabled? */
@@ -114,9 +122,42 @@ static struct client_state g_client_state = {0};
 void update_display();
 void clear_display();
 
-void ignore_user1(int signum)
+void ignore_signal(int signum)
 {
 }
+
+void write_msg(int fd, struct msg *msg)
+{
+    /* put this in a while() loop to ensure all data is written */
+    int total_written = 0, bytes_written;
+    while (total_written < sizeof(struct msg)) {
+        bytes_written = write(fd, ((char *)msg) + total_written, sizeof(struct msg) - total_written);
+        if (bytes_written > 0) {
+            total_written += bytes_written;
+        } else {
+            break;
+        }
+    }
+}
+
+int read_msg(int fd, struct msg *msg)
+{
+    int total_read = 0, bytes_read;
+    while (total_read < sizeof(struct msg)) {
+        bytes_read = read(fd, ((char *)msg) + total_read, sizeof(struct msg) - total_read);
+        if (bytes_read > 0) {
+            total_read += bytes_read;
+        } else {
+            if (bytes_read == -1) {
+                perror("read");
+            }
+            break;
+        }
+    }
+
+    return total_read;
+}
+
 
 void clear_history()
 {
@@ -140,7 +181,8 @@ void clear_history()
 
     rl_clear_history();
 }
-void clear_display()
+
+void clear_display(void)
 {
     printf("%s", RESET_TERM);
     printf("%s", CLEAR_SCROLLBACK);
@@ -403,33 +445,33 @@ void *server_thread(void *arg)
             if (fds[i].revents & POLLIN) {
                 /* read this msg */
                 struct msg msg = {0};
-                int total_read = 0;
-                int bytes_read = 0;
-                /* read ALL THE DATA */
-                while (total_read < sizeof(struct msg)) {
-                    bytes_read = read(fds[i].fd, ((char *)&msg) + total_read, sizeof(struct msg) - total_read);
-                    if (bytes_read == 0) {
-                        break;
-                    }
-                    total_read += bytes_read;
-                }
-                if (bytes_read == -1 && errno != EAGAIN) {
-                    printf("uh oh... read() failed\n");
-                    /* TODO do we trust the message we received? probably? do we close the socket?
-                     * what condition would cause a read() failure and not a corresponding error
-                     * in poll()?
-                     */
-                }
-                if (total_read > 0) {
-                    /* switch() for message types? */
+                /* read a message */
+                int total_read = read_msg(fds[i].fd, &msg);
+
+                if (total_read == sizeof(struct msg)) {
                     switch(msg.type) {
                         case MSG_JOIN:
-                            if (nicks[i].nick[0] == '\0') {
-                                snprintf(nicks[i].nick, NICK_SIZE-1, "%s", msg.nick);
-                                /* ensure null-terminated */
-                                snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i].nick);
+                            if (nicks[i].nick[0] == '\0') { /* if we don't have a nick for this user yet */
+                                /* make sure the nick isn't taken already */
+                                for (int j = 1; j < num_fds; j++) {
+                                    printf("comparing %s to %s\n", nicks[j].nick, msg.nick);
+                                    if (strcmp(nicks[j].nick, msg.nick) == 0) {
+                                        /* nick taken; reject this join */
+                                        msg.type = MSG_JOIN_REJECTED;
+                                        write_msg(fds[i].fd, &msg);
+                                        total_read = 0;
+                                        break;
+                                    }
+                                }
+                                /* did we survive the duplicate nick check? */
+                                if (msg.type == MSG_JOIN) {
+                                    printf("accepting user %s\n", msg.nick);
+                                    snprintf(nicks[i].nick, NICK_SIZE-1, "%s", msg.nick);
+                                    /* ensure null-terminated */
+                                    snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i].nick);
+                                }
                             } else {
-                                printf("ignoring re-join\n");
+                                /* ignore rejoin */
                                 total_read = 0;
                             }
                             break;
@@ -455,17 +497,12 @@ void *server_thread(void *arg)
 
                     /* propogate this message to all other sockets */
                     /* we want to write this message back to the socket it came from, too */
-                    for (int j = 1; j < num_fds; j++) {
-                        int total_written = 0;
-                        int bytes_written = 0;
-                        /* write ALL THE DATA */
-                        while (total_written < total_read) {
-                            bytes_written = write(fds[j].fd, ((char *)&msg) + total_written, total_read - total_written);
-                            if (bytes_written <= 0) {
-                                printf("write() <= 0 ??\n");
-                                break;
+                    if (total_read == sizeof(struct msg)) {
+                        for (int j = 1; j < num_fds; j++) {
+                            /* write ALL THE DATA */
+                            if (nicks[j].nick[0] != '\0') {
+                                write_msg(fds[j].fd, &msg);
                             }
-                            total_written += bytes_written;
                         }
                     }
                 }
@@ -499,54 +536,38 @@ void *server_thread(void *arg)
     pthread_exit(0);
 }
 
-void write_msg(int fd, struct msg *msg)
-{
-    /* put this in a while() loop to ensure all data is written */
-    int total_written = 0, bytes_written;
-    while (total_written < sizeof(struct msg)) {
-        bytes_written = write(fd, ((char *)msg) + total_written, sizeof(struct msg) - total_written);
-        if (bytes_written > 0) {
-            total_written += bytes_written;
-        } else {
-            break;
-        }
-    }
-}
-
-int read_msg(int fd, struct msg *msg)
-{
-    int total_read = 0, bytes_read;
-    while (total_read < sizeof(struct msg)) {
-        bytes_read = read(fd, ((char *)msg) + total_read, sizeof(struct msg) - total_read);
-        if (bytes_read > 0) {
-            total_read += bytes_read;
-        } else {
-            break;
-        }
-    }
-
-    return total_read;
-}
-
 void *user_input_thread(void *arg)
 {
     int fd = *(int *)arg;
     struct msg msg = {0};
     char *rl_str = NULL;
 
-    /* first, prompt for nick */
-    do {
-        rl_str = readline("enter nick: ");
-    } while (rl_str == NULL);
+    while (1) {
+        g_client_state.join_state = JOIN_PENDING;
 
-    memcpy(g_client_state.nick, rl_str, NICK_SIZE-1);
-    free(rl_str);
+        /* first, prompt for nick */
+        do {
+            rl_str = readline("enter nick: ");
+        } while (rl_str == NULL);
 
-    strncpy(msg.nick, g_client_state.nick, NICK_SIZE-1);
-    msg.type = MSG_JOIN;
-    msg.time = time(NULL);
-    write_msg(fd, &msg);
+        strncpy(msg.nick, rl_str, NICK_SIZE-1);
+        free(rl_str);
+        msg.type = MSG_JOIN;
+        msg.time = time(NULL);
+        write_msg(fd, &msg);
 
+        while (g_client_state.join_state == JOIN_PENDING) {
+            sleep(0.1f);
+        }
+
+        if (g_client_state.join_state == JOINED) {
+            break;
+        }
+
+        printf("nick taken! try again\n");
+    }
+
+    memcpy(g_client_state.nick, msg.nick, NICK_SIZE-1);
     using_history();
     clear_display();
     pthread_mutex_lock(&msg_mutex);
@@ -567,6 +588,7 @@ void *user_input_thread(void *arg)
         msg.type = MSG_NORMAL;
         write_msg(fd, &msg);
         free(rl_str);
+        printf("%s", CLEAR_LINE);
     }
 
     printf("user_input_thread() exiting\n");
@@ -588,6 +610,21 @@ void *server_processing_thread(void *arg)
             printf("server hung up!\n");
             break;
         }
+
+        if (g_client_state.join_state == JOIN_PENDING) {
+            switch (msg.type) {
+                case MSG_JOIN:
+                    g_client_state.join_state = JOINED;
+                    break;
+                case MSG_JOIN_REJECTED:
+                    g_client_state.join_state = JOIN_REJECTED;
+                    continue;
+                    break;
+                default:
+                    break;
+            }
+        }
+
         pthread_mutex_lock(&msg_mutex);
         add_new_message(&msg);
         if (g_client_state.clear_mode) {
@@ -618,8 +655,9 @@ void client(const struct sockaddr_un *sock)
     new_action.sa_handler = window_resized;
     sigaction(SIGWINCH, &new_action, NULL);
 
-    new_action.sa_handler = ignore_user1;
+    new_action.sa_handler = ignore_signal;
     sigaction(SIGUSR1, &new_action, NULL);
+    sigaction(SIGINT, &new_action, NULL);
 
     /* connect to socket to get fd */
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -630,7 +668,7 @@ void client(const struct sockaddr_un *sock)
 
     printf("waiting to connect...\n");
 
-    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && errno == ENOENT && counter < 10) {
+    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && counter < 10) {
         sleep(0.1f);
         counter++;
     }
@@ -666,7 +704,7 @@ int main(int argc, char **argv)
     int is_server = 0;
     void *res;
     char comms_dir_template[] = COMMS_DIR_TEMPLATE;
-    char sockpath[sizeof(COMMS_DIR_TEMPLATE) + sizeof(JCHAT_SOCK_FILENAME)];
+    char sockpath[sizeof(COMMS_DIR_TEMPLATE) + sizeof(JCHAT_SOCK_FILENAME)] = {0};
 
     char *response = NULL;
 
@@ -691,20 +729,20 @@ int main(int argc, char **argv)
         }
         snprintf(sockpath, sizeof(sockpath), comms_dir_template);
         snprintf(g_client_state.prompt, PROMPT_SIZE, "%s> ", &comms_dir_template[11]);
-        //printf("key: %s\n", &comms_dir_template[11]);
     } else {
         if (strlen(response) != 6) {
             printf("invalid key, goodbye!\n");
             exit(EXIT_FAILURE);
         } else {
-          snprintf(sockpath, sizeof(sockpath), "/tmp/comms.%s", response);
-          snprintf(g_client_state.prompt, PROMPT_SIZE, "> ");
+            snprintf(sockpath, sizeof(sockpath), "/tmp/comms.%s", response);
+            snprintf(g_client_state.prompt, PROMPT_SIZE, "> ");
         }
     }
 
     if (response) {
         free(response);
     }
+
     strcat(sockpath, JCHAT_SOCK_FILENAME);
 
     snprintf(sock.sun_path, sizeof(sock.sun_path), sockpath);
@@ -713,14 +751,21 @@ int main(int argc, char **argv)
         pthread_create(&pt_server, NULL, &server_thread, &sock);
     }
 
-    clear_display();
-    fflush(stdout);
-
     client(&sock);
 
     if (is_server) {
-        printf("server is still running... [ctrl-c] to stop\n");
-        pthread_join(pt_server, &res);
+        printf("server is still running... [enter] to stop\n");
+        readline(NULL);
+    }
+
+    // reset terminal
+    printf("%s", RESET_TERM);
+    printf("%s", CLEAR_SCROLLBACK);
+    printf("%s", CLEAR_SCREEN);
+
+    if (is_server) {
+        unlink(sockpath);
+        rmdir(comms_dir_template);
     }
 
     return 0;
