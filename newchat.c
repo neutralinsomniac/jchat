@@ -219,15 +219,15 @@ void delete_node(struct node *node)
     node = NULL;
 }
 
-void copy_msg(struct node *node, struct msg *msg)
+void copy_msg(struct node *dst, struct msg *src)
 {
-    strncpy(node->msg.msg, msg->msg, MSG_SIZE);
-    strncpy(node->msg.nick, msg->nick, NICK_SIZE);
-    node->msg.time = msg->time;
-    if (strncmp(msg->nick, g_client_state.nick, NICK_SIZE) == 0) {
-        node->msg.type = MSG_OWN;
+    strncpy(dst->msg.msg, src->msg, MSG_SIZE);
+    strncpy(dst->msg.nick, src->nick, NICK_SIZE);
+    dst->msg.time = src->time;
+    if (strncmp(src->nick, g_client_state.nick, NICK_SIZE) == 0) {
+        dst->msg.type = MSG_OWN;
     } else {
-        node->msg.type = msg->type;
+        dst->msg.type = src->type;
     }
 }
 
@@ -387,7 +387,7 @@ void *server_thread(void *arg)
         int fd;
         char nick[NICK_SIZE];
     };
-    struct nick_entry nicks[MAX_USERS+1];
+    char nicks[MAX_USERS+1][NICK_SIZE];
 
     memset(fds, 0, sizeof(fds));
     memset(nicks, 0, sizeof(nicks));
@@ -429,8 +429,7 @@ void *server_thread(void *arg)
             fds[num_fds].revents = 0;
 
             /* put client_fd into empty nick slot + init nick */
-            nicks[num_fds].fd = client_fd;
-            memset(nicks[num_fds].nick, 0, NICK_SIZE);
+            memset(nicks[num_fds], 0, NICK_SIZE);
 
             num_fds++;
         }
@@ -451,11 +450,10 @@ void *server_thread(void *arg)
                 if (total_read == sizeof(struct msg)) {
                     switch(msg.type) {
                         case MSG_JOIN:
-                            if (nicks[i].nick[0] == '\0') { /* if we don't have a nick for this user yet */
+                            if (nicks[i][0] == '\0') { /* if we don't have a nick for this user yet */
                                 /* make sure the nick isn't taken already */
                                 for (int j = 1; j < num_fds; j++) {
-                                    printf("comparing %s to %s\n", nicks[j].nick, msg.nick);
-                                    if (strcmp(nicks[j].nick, msg.nick) == 0) {
+                                    if (strcmp(nicks[j], msg.nick) == 0) {
                                         /* nick taken; reject this join */
                                         msg.type = MSG_JOIN_REJECTED;
                                         write_msg(fds[i].fd, &msg);
@@ -466,9 +464,9 @@ void *server_thread(void *arg)
                                 /* did we survive the duplicate nick check? */
                                 if (msg.type == MSG_JOIN) {
                                     printf("accepting user %s\n", msg.nick);
-                                    snprintf(nicks[i].nick, NICK_SIZE-1, "%s", msg.nick);
+                                    snprintf(nicks[i], NICK_SIZE-1, "%s", msg.nick);
                                     /* ensure null-terminated */
-                                    snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i].nick);
+                                    snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i]);
                                 }
                             } else {
                                 /* ignore rejoin */
@@ -476,8 +474,8 @@ void *server_thread(void *arg)
                             }
                             break;
                         case MSG_QUIT:
-                            if (nicks[i].nick[0] != '\0') {
-                                snprintf(msg.msg, sizeof(msg.msg), "%s left the chat!", nicks[i].nick);
+                            if (nicks[i][0] != '\0') {
+                                snprintf(msg.msg, sizeof(msg.msg), "%s left the chat!", nicks[i]);
                             } else {
                                 /* received quit from someone who hasn't given a nick yet */
                                 total_read = 0;
@@ -493,14 +491,14 @@ void *server_thread(void *arg)
                             break;
                     }
 
-                    strncpy(msg.nick, nicks[i].nick, NICK_SIZE-1);
+                    strncpy(msg.nick, nicks[i], NICK_SIZE-1);
 
                     /* propogate this message to all other sockets */
                     /* we want to write this message back to the socket it came from, too */
                     if (total_read == sizeof(struct msg)) {
                         for (int j = 1; j < num_fds; j++) {
                             /* write ALL THE DATA */
-                            if (nicks[j].nick[0] != '\0') {
+                            if (nicks[j][0] != '\0') {
                                 write_msg(fds[j].fd, &msg);
                             }
                         }
@@ -523,10 +521,9 @@ void *server_thread(void *arg)
                 fds[i].fd = fds[num_fds-1].fd;
                 fds[i].events = POLLIN;
 
-                nicks[i].fd = nicks[num_fds-1].fd;
-                memcpy(nicks[i].nick, nicks[num_fds-1].nick, NICK_SIZE);
+                memcpy(nicks[i], nicks[num_fds-1], NICK_SIZE);
 
-                memset(nicks[num_fds-1].nick, 0, NICK_SIZE);
+                memset(nicks[num_fds-1], 0, NICK_SIZE);
 
                 num_fds--;
             }
