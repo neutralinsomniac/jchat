@@ -591,7 +591,7 @@ void *user_input_thread(void *arg)
         msg.time = time(NULL);
         msg.type = MSG_NORMAL;
         write_msg(fd, &msg);
-		add_history(rl_str);
+        add_history(rl_str);
         free(rl_str);
         printf("%s", CLEAR_LINE);
     }
