@@ -65,7 +65,6 @@
 #define TYPING_STALLED_CMD '|'
 
 enum msg_type {
-    MSG_OWN,
     MSG_NORMAL,
     MSG_JOIN,
     MSG_JOIN_REJECTED,
@@ -106,6 +105,7 @@ __attribute__((packed)) struct msg {
 /* this is what gets stored in the client(s) */
 struct node {
     struct msg msg; /* note: this is *NOT* packed */
+    uint8_t own;
     struct node *next;
     struct node *prev;
 };
@@ -222,11 +222,10 @@ void copy_msg(struct node *dst, struct msg *src)
     strncpy(dst->msg.msg, src->msg, MSG_SIZE);
     strncpy(dst->msg.nick, src->nick, NICK_SIZE);
     dst->msg.time = src->time;
-    if (src->type == MSG_NORMAL && strncmp(src->nick, g_client_state.nick, NICK_SIZE) == 0) {
-        dst->msg.type = MSG_OWN;
-    } else {
-        dst->msg.type = src->type;
+    if (strncmp(src->nick, g_client_state.nick, NICK_SIZE) == 0) {
+        dst->own = 1;
     }
+    dst->msg.type = src->type;
 }
 
 void add_new_message(struct msg *msg)
@@ -328,18 +327,19 @@ void update_display()
         printf("%s", time_str);
 
         switch (iter->msg.type) {
-            case MSG_OWN:
-                printf("%s", COLOR_CYAN);
-                break;
             case MSG_NORMAL:
-                printf("%s", COLOR_YELLOW);
+                if (iter->own) {
+                    printf("%s", COLOR_CYAN);
+                } else {
+                    printf("%s", COLOR_YELLOW);
+                }
                 break ;
             default:
                 printf("%s", COLOR_NONE);
                 break;
         }
 
-        if (iter->msg.type == MSG_OWN || iter->msg.type == MSG_NORMAL) {
+        if (iter->msg.type == MSG_NORMAL) {
             printf("%s: %s", iter->msg.nick, iter->msg.msg);
         } else {
             printf("%s", iter->msg.msg);
