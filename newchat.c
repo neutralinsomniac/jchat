@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #define COMMS_DIR_TEMPLATE "/tmp/comms.XXXXXX"
 #define JCHAT_SOCK_FILENAME "/jchat.sock"
@@ -87,11 +88,11 @@ struct client_state {
     enum join_state join_state;
     char nick[NICK_SIZE]; /* own nick */
     char prompt[PROMPT_SIZE]; /* custom prompt string */
-    int clear_mode; /* is clear mode enabled? */
-    int transient_mode; /* is transient mode enabled? */
-    int urgent_mode; /* urgent mode */
-    int num_pending_msg;
-    int should_exit;
+    uint8_t clear_mode; /* is clear mode enabled? */
+    uint8_t transient_mode; /* is transient mode enabled? */
+    uint8_t urgent_mode; /* urgent mode */
+    uint32_t num_pending_msg;
+    uint8_t should_exit;
 };
 
 /* this is what gets passed on the wire */
