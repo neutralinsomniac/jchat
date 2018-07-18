@@ -85,7 +85,7 @@ enum urgent_type {
 
 struct client_state {
     enum join_state join_state;
-    char nick[NICK_SIZE]; /* own nick */
+    int user_id;
     char prompt[PROMPT_SIZE]; /* custom prompt string */
     uint8_t clear_mode; /* is clear mode enabled? */
     uint8_t transient_mode; /* is transient mode enabled? */
@@ -98,6 +98,7 @@ struct client_state {
 __attribute__((packed)) struct msg {
     enum msg_type type;
     time_t time;
+    int user_id;
     char nick[NICK_SIZE];
     char msg[MSG_SIZE];
 };
@@ -105,7 +106,6 @@ __attribute__((packed)) struct msg {
 /* this is what gets stored in the client(s) */
 struct node {
     struct msg msg; /* note: this is *NOT* packed */
-    uint8_t own;
     struct node *next;
     struct node *prev;
 };
@@ -221,10 +221,8 @@ void copy_msg(struct node *dst, struct msg *src)
 {
     strncpy(dst->msg.msg, src->msg, MSG_SIZE);
     strncpy(dst->msg.nick, src->nick, NICK_SIZE);
+    dst->msg.user_id = src->user_id;
     dst->msg.time = src->time;
-    if (strncmp(src->nick, g_client_state.nick, NICK_SIZE) == 0) {
-        dst->own = 1;
-    }
     dst->msg.type = src->type;
 }
 
@@ -328,7 +326,7 @@ void update_display()
 
         switch (iter->msg.type) {
             case MSG_NORMAL:
-                if (iter->own) {
+                if (iter->msg.user_id == g_client_state.user_id) {
                     printf("%s", COLOR_CYAN);
                 } else {
                     printf("%s", COLOR_YELLOW);
@@ -489,6 +487,7 @@ void *server_thread(void *arg)
                     }
 
                     strncpy(msg.nick, nicks[i], NICK_SIZE-1);
+                    msg.user_id = fds[i].fd;
 
                     /* propogate this message to all other sockets */
                     /* we want to write this message back to the socket it came from, too */
@@ -571,7 +570,6 @@ void *user_input_thread(void *arg)
         printf("%s", CLEAR_LINE);
     }
 
-    memcpy(g_client_state.nick, msg.nick, NICK_SIZE-1);
     using_history();
     clear_display();
     pthread_mutex_lock(&msg_mutex);
@@ -619,6 +617,8 @@ void *server_processing_thread(void *arg)
             switch (msg.type) {
                 case MSG_JOIN:
                     g_client_state.join_state = JOINED;
+                    /* since this is the first message we will receive, this message *must* contain our user_id */
+                    g_client_state.user_id = msg.user_id;
                     break;
                 case MSG_JOIN_REJECTED:
                     g_client_state.join_state = JOIN_REJECTED;
