@@ -577,13 +577,28 @@ void *user_input_thread(void *arg)
     pthread_mutex_unlock(&msg_mutex);
 
     /* main msg processing loop */
-    while ((rl_str = readline(g_client_state.prompt)) != NULL) {
-        if (rl_str[0] == '\0') {
-            pthread_mutex_lock(&msg_mutex);
-            update_display();
-            pthread_mutex_unlock(&msg_mutex);
-            continue;
+    while (!g_client_state.should_exit && (rl_str = readline(g_client_state.prompt)) != NULL) {
+        switch (strlen(rl_str)) {
+            case 0:
+                pthread_mutex_lock(&msg_mutex);
+                clear_display();
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
+                continue;
+                break;
+            case 1:
+                switch (rl_str[0]) {
+                    case 'q':
+                        g_client_state.should_exit = 1;
+                        continue;
+                        break;
+                    default:
+                        break;
+                }
+            default:
+                break;
         }
+
         memset(&msg, 0, sizeof(struct msg));
         strncpy(msg.msg, rl_str, MSG_SIZE-1);
         msg.time = time(NULL);
