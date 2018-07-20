@@ -3,17 +3,18 @@
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
-#include <stdio.h>
-#include <readline/readline.h>
-#include <readline/history.h>
 #include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <stdint.h>
+
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define COMMS_DIR_TEMPLATE "/tmp/comms.XXXXXX"
 #define JCHAT_SOCK_FILENAME "/jchat.sock"
@@ -69,6 +70,7 @@ enum msg_type {
     MSG_JOIN,
     MSG_JOIN_REJECTED,
     MSG_REDACT,
+    MSG_CLEAR_HISTORY,
     MSG_QUIT
 };
 
@@ -80,7 +82,7 @@ enum join_state {
 
 enum urgent_type {
     URGENT_ALL = 0,
-    URGENT_MSG_ONLY    = 1,
+    URGENT_MSG_ONLY = 1,
     URGENT_NONE = 2
 };
 
@@ -131,7 +133,6 @@ void ignore_signal(int signum)
 
 void write_msg(int fd, struct msg *msg)
 {
-    /* put this in a while() loop to ensure all data is written */
     int total_written = 0, bytes_written;
     while (total_written < sizeof(struct msg)) {
         bytes_written = write(fd, ((char *)msg) + total_written, sizeof(struct msg) - total_written);
@@ -230,16 +231,21 @@ void copy_msg(struct node *dst, struct msg *src)
 
 void process_message(struct msg *msg)
 {
-	switch(msg->type) {
-	case MSG_NORMAL:
-	case MSG_JOIN:
-	case MSG_QUIT:
-		add_new_message(msg);
-		break;
-	default:
-		/* ??? */
-		break;
-	}
+    switch(msg->type) {
+    case MSG_NORMAL:
+    case MSG_JOIN:
+    case MSG_CLEAR_HISTORY:
+    case MSG_QUIT:
+        add_new_message(msg);
+        if (g_client_state.clear_mode) {
+            g_client_state.num_pending_msg++;
+            //update_prompt();
+        }
+        break;
+    default:
+        /* ??? */
+        break;
+    }
 }
 
 void add_new_message(struct msg *msg)
@@ -341,16 +347,17 @@ void update_display(void)
         printf("%s", time_str);
 
         switch (iter->msg.type) {
-            case MSG_NORMAL:
-                if (iter->msg.user_id == g_client_state.user_id) {
-                    printf("%s", COLOR_CYAN);
-                } else {
-                    printf("%s", COLOR_YELLOW);
-                }
-                break ;
-            default:
-                printf("%s", COLOR_NONE);
-                break;
+        case MSG_NORMAL:
+            if (iter->msg.user_id == g_client_state.user_id) {
+                printf("%s", COLOR_CYAN);
+            } else {
+                printf("%s", COLOR_YELLOW);
+            }
+            break ;
+        default:
+            printf("%s", COLOR_NONE);
+            break;
+
         }
 
         if (iter->msg.type == MSG_NORMAL) {
@@ -484,6 +491,14 @@ void *server_thread(void *arg)
                             total_read = 0;
                         }
                         break;
+                    case MSG_CLEAR_HISTORY:
+                        if (nicks[i][0] != '\0') {
+                            snprintf(msg.msg, sizeof(msg.msg), "%s cleared history!", nicks[i]);
+                        } else {
+                            /* received clear history from someone who hasn't given a nick yet */
+                            total_read = 0;
+                        }
+                        break;
                     case MSG_QUIT:
                         if (nicks[i][0] != '\0') {
                             snprintf(msg.msg, sizeof(msg.msg), "%s left the chat!", nicks[i]);
@@ -500,7 +515,6 @@ void *server_thread(void *arg)
                         /* make sure we don't write anything to other clients */
                         total_read = 0;
                         break;
-
                     }
 
                     strncpy(msg.nick, nicks[i], NICK_SIZE-1);
@@ -607,12 +621,20 @@ void *user_input_thread(void *arg)
         /* single letter command */
         case 1:
             switch (rl_str[0]) {
-                case 'q':
-                    g_client_state.should_exit = 1;
-                    continue;
-                    break;
-                default:
-                    break;
+            case 'q':
+                g_client_state.should_exit = 1;
+                continue;
+            case 'C':
+                pthread_mutex_lock(&msg_mutex);
+                clear_history();
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
+                msg.type = MSG_CLEAR_HISTORY;
+                msg.time = time(NULL);
+                write_msg(fd, &msg);
+                continue;
+            default:
+                break;
             }
         default:
             break;
@@ -650,26 +672,23 @@ void *server_processing_thread(void *arg)
 
         if (g_client_state.join_state == JOIN_PENDING) {
             switch (msg.type) {
-                case MSG_JOIN:
-                    g_client_state.join_state = JOINED;
-                    /* since this is the first message we will receive, this message *must* contain our user_id */
-                    g_client_state.user_id = msg.user_id;
-                    break;
-                case MSG_JOIN_REJECTED:
-                    g_client_state.join_state = JOIN_REJECTED;
-                    continue;
-                    break;
-                default:
-                    break;
+            case MSG_JOIN:
+                g_client_state.join_state = JOINED;
+                /* since this is the first message we will receive, this message *must* contain our user_id */
+                g_client_state.user_id = msg.user_id;
+                break;
+            case MSG_JOIN_REJECTED:
+                g_client_state.join_state = JOIN_REJECTED;
+                continue;
+                break;
+            default:
+                break;
+
             }
         }
 
         pthread_mutex_lock(&msg_mutex);
         process_message(&msg);
-        if (g_client_state.clear_mode) {
-            g_client_state.num_pending_msg++;
-            //update_prompt();
-        }
         update_display();
         if (g_client_state.urgent_mode != URGENT_NONE) {
             printf("%s", VISIBLE_BEEP);
