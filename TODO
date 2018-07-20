@@ -2,3 +2,5 @@
 - implement remaining commands
 	- redact
 	- clear mode
+- dynamic prompt
+- add key to everyone's prompt? or add a command to display it? probably the former
