@@ -68,6 +68,7 @@ enum msg_type {
     MSG_NORMAL,
     MSG_JOIN,
     MSG_JOIN_REJECTED,
+    MSG_REDACT,
     MSG_QUIT
 };
 
