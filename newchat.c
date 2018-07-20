@@ -120,8 +120,9 @@ struct winsize w;
 
 static struct client_state g_client_state = {0};
 
-void update_display();
-void clear_display();
+void update_display(void);
+void clear_display(void);
+void add_new_message(struct msg *);
 
 void ignore_signal(int signum)
 {
@@ -157,7 +158,7 @@ int read_msg(int fd, struct msg *msg)
 }
 
 
-void clear_history()
+void clear_history(void)
 {
     struct node *iter;
     struct node *next;
@@ -226,6 +227,20 @@ void copy_msg(struct node *dst, struct msg *src)
     dst->msg.type = src->type;
 }
 
+void process_message(struct msg *msg)
+{
+	switch(msg->type) {
+	case MSG_NORMAL:
+	case MSG_JOIN:
+	case MSG_QUIT:
+		add_new_message(msg);
+		break;
+	default:
+		/* ??? */
+		break;
+	}
+}
+
 void add_new_message(struct msg *msg)
 {
     struct node *new = NULL;
@@ -267,7 +282,7 @@ void add_new_message(struct msg *msg)
     }
 }
 
-void update_display()
+void update_display(void)
 {
     int count = 0, i;
     struct node *iter;
@@ -445,45 +460,46 @@ void *server_thread(void *arg)
 
                 if (total_read == sizeof(struct msg)) {
                     switch(msg.type) {
-                        case MSG_JOIN:
-                            if (nicks[i][0] == '\0') { /* if we don't have a nick for this user yet */
-                                /* make sure the nick isn't taken already */
-                                for (int j = 1; j < num_fds; j++) {
-                                    if (strcmp(nicks[j], msg.nick) == 0) {
-                                        /* nick taken; reject this join */
-                                        msg.type = MSG_JOIN_REJECTED;
-                                        write_msg(fds[i].fd, &msg);
-                                        total_read = 0;
-                                        break;
-                                    }
+                    case MSG_JOIN:
+                        if (nicks[i][0] == '\0') { /* if we don't have a nick for this user yet */
+                            /* make sure the nick isn't taken already */
+                            for (int j = 1; j < num_fds; j++) {
+                                if (strcmp(nicks[j], msg.nick) == 0) {
+                                    /* nick taken; reject this join */
+                                    msg.type = MSG_JOIN_REJECTED;
+                                    write_msg(fds[i].fd, &msg);
+                                    total_read = 0;
+                                    break;
                                 }
-                                /* did we survive the duplicate nick check? */
-                                if (msg.type == MSG_JOIN) {
-                                    snprintf(nicks[i], NICK_SIZE-1, "%s", msg.nick);
-                                    /* ensure null-terminated */
-                                    snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i]);
-                                }
-                            } else {
-                                /* ignore rejoin */
-                                total_read = 0;
                             }
-                            break;
-                        case MSG_QUIT:
-                            if (nicks[i][0] != '\0') {
-                                snprintf(msg.msg, sizeof(msg.msg), "%s left the chat!", nicks[i]);
-                            } else {
-                                /* received quit from someone who hasn't given a nick yet */
-                                total_read = 0;
+                            /* did we survive the duplicate nick check? */
+                            if (msg.type == MSG_JOIN) {
+                                snprintf(nicks[i], NICK_SIZE-1, "%s", msg.nick);
+                                /* ensure null-terminated */
+                                snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i]);
                             }
-                            remove = 1;
-                            break;
-                        case MSG_NORMAL:
-                            break;
-                        default:
-                            printf("received unknown command: %d, ignoring\n", msg.type);
-                            /* make sure we don't write anything to other clients */
+                        } else {
+                            /* ignore rejoin */
                             total_read = 0;
-                            break;
+                        }
+                        break;
+                    case MSG_QUIT:
+                        if (nicks[i][0] != '\0') {
+                            snprintf(msg.msg, sizeof(msg.msg), "%s left the chat!", nicks[i]);
+                        } else {
+                            /* received quit from someone who hasn't given a nick yet */
+                            total_read = 0;
+                        }
+                        remove = 1;
+                        break;
+                    case MSG_NORMAL:
+                        break;
+                    default:
+                        printf("received unknown command: %d, ignoring\n", msg.type);
+                        /* make sure we don't write anything to other clients */
+                        total_read = 0;
+                        break;
+
                     }
 
                     strncpy(msg.nick, nicks[i], NICK_SIZE-1);
@@ -579,24 +595,27 @@ void *user_input_thread(void *arg)
     /* main msg processing loop */
     while (!g_client_state.should_exit && (rl_str = readline(g_client_state.prompt)) != NULL) {
         switch (strlen(rl_str)) {
-            case 0:
-                pthread_mutex_lock(&msg_mutex);
-                clear_display();
-                update_display();
-                pthread_mutex_unlock(&msg_mutex);
-                continue;
-                break;
-            case 1:
-                switch (rl_str[0]) {
-                    case 'q':
-                        g_client_state.should_exit = 1;
-                        continue;
-                        break;
-                    default:
-                        break;
-                }
-            default:
-                break;
+        /* user pressed enter with no text entered; do a full screen refresh */
+        case 0:
+            pthread_mutex_lock(&msg_mutex);
+            clear_display();
+            update_display();
+            pthread_mutex_unlock(&msg_mutex);
+            continue;
+            break;
+        /* single letter command */
+        case 1:
+            switch (rl_str[0]) {
+                case 'q':
+                    g_client_state.should_exit = 1;
+                    continue;
+                    break;
+                default:
+                    break;
+            }
+        default:
+            break;
+
         }
 
         memset(&msg, 0, sizeof(struct msg));
@@ -645,7 +664,7 @@ void *server_processing_thread(void *arg)
         }
 
         pthread_mutex_lock(&msg_mutex);
-        add_new_message(&msg);
+        process_message(&msg);
         if (g_client_state.clear_mode) {
             g_client_state.num_pending_msg++;
             //update_prompt();
