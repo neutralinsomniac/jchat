@@ -377,7 +377,7 @@ void update_display(void)
     fflush(stdout);
 }
 
-void update_prompt()
+void update_prompt(void)
 {
     printf ("%s", CLEAR_LINE);
     snprintf(g_client_state.prompt, PROMPT_SIZE-1, "> ");
