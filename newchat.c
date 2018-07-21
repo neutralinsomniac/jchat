@@ -22,6 +22,7 @@
 
 #define BUF_SIZE 1024
 #define MSG_SIZE 4096
+#define MAX_CONNECT_RETRIES 10
 #define PROMPT_SIZE 32
 #define NICK_SIZE 16
 #define MAX_USERS 32
@@ -453,7 +454,7 @@ void *server_thread(void *arg)
             num_fds++;
         }
         if ((fds[0].revents & ~POLLIN) > 0) {
-            printf("server fd has an event: %x\n", fds[0].revents);
+            printf("server fd has an event other than POLLIN: %x\n", fds[0].revents);
         }
         int remove = 0;
         /* figure out which fds have events */
@@ -726,19 +727,18 @@ void client(const struct sockaddr_un *sock)
 
     printf("waiting to connect...\n");
 
-    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && counter < 10) {
+    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && counter < MAX_CONNECT_RETRIES) {
         sleep(0.1f);
         counter++;
     }
 
-    clear_display();
-
-    if (fd < 0) {
+    if (counter >= MAX_CONNECT_RETRIES) {
         perror("failed to connect");
         exit(EXIT_FAILURE);
     }
 
     /* init state */
+    clear_display();
     g_client_state.urgent_mode = URGENT_ALL;
     g_client_state.num_pending_msg = 0;
 
