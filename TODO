@@ -1,7 +1,4 @@
 - change main() sleep() to pthread event (start locked/unlock when one of the threads exits)
 - implement remaining commands
 	- redact
-	- clear mode
 - add mark
-- dynamic prompt
-- add key to everyone's prompt? or add a command to display it? probably the former
