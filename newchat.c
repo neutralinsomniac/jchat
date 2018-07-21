@@ -793,7 +793,7 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         } else {
             snprintf(sockpath, sizeof(sockpath), "/tmp/comms.%s", response);
-            snprintf(g_client_state.prompt, PROMPT_SIZE, "> ");
+            snprintf(g_client_state.prompt, PROMPT_SIZE, "%s> ", response);
         }
     }
 
