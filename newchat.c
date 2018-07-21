@@ -371,7 +371,7 @@ void update_display(void)
             } else {
                 printf("%s", COLOR_YELLOW);
             }
-            break ;
+            break;
         default:
             printf("%s", COLOR_NONE);
             break;
@@ -380,7 +380,7 @@ void update_display(void)
 
         if (iter->msg.type == MSG_NORMAL) {
             printf("%s: %s", iter->msg.nick, iter->msg.msg);
-        } else {
+        } else if (iter->msg.msg[0]) {
             printf("%s", iter->msg.msg);
         }
 
