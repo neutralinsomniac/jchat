@@ -213,6 +213,7 @@ void clear_display(void)
 
     // position cursor
     printf("\033[%u;1f", w.ws_row);
+    fflush(stdout);
 }
 
 void delete_node(struct node *node)
