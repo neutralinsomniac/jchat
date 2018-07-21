@@ -556,7 +556,7 @@ void *server_thread(void *arg)
         }
     }
 
-    pthread_exit(0);
+    pthread_exit(EXIT_SUCCESS);
 }
 
 void *user_input_thread(void *arg)
@@ -573,7 +573,7 @@ void *user_input_thread(void *arg)
 
         if (rl_str == NULL) {
             g_client_state.should_exit = 1;
-            pthread_exit(0);
+            pthread_exit(EXIT_SUCCESS);
         }
 
         if (rl_str[0] == '\0') {
@@ -657,7 +657,7 @@ void *user_input_thread(void *arg)
     msg.type = MSG_QUIT;
     write_msg(fd, &msg);
     g_client_state.should_exit = 1;
-    pthread_exit(0);
+    pthread_exit(EXIT_SUCCESS);
 }
 
 void *server_processing_thread(void *arg)
@@ -699,7 +699,7 @@ void *server_processing_thread(void *arg)
     }
 
     g_client_state.should_exit = 1;
-    pthread_exit(0);
+    pthread_exit(EXIT_SUCCESS);
 }
 
 void client(const struct sockaddr_un *sock)
