@@ -22,6 +22,7 @@
 
 #define BUF_SIZE 1024
 #define MSG_SIZE 4096
+#define KEY_SIZE 7
 #define MAX_CONNECT_RETRIES 10
 #define PROMPT_SIZE 32
 #define NICK_SIZE 16
@@ -44,9 +45,6 @@
 #define COLOR_GREEN "\033[32m"
 #define COLOR_YELLOW "\033[33m"
 #define COLOR_CYAN "\033[36m"
-
-#define MSG_MARK "----- mark -----"
-#define MSG_HISTORY_CLEARED_FMT "%s cleared their history"
 
 /* ui commands */
 #define UI_CMD_SIZE 3
@@ -72,6 +70,7 @@ enum msg_type {
     MSG_JOIN_REJECTED,
     MSG_REDACT,
     MSG_CLEAR_HISTORY,
+    MSG_MARK,
     MSG_QUIT
 };
 
@@ -91,6 +90,7 @@ struct client_state {
     enum join_state join_state;
     int user_id;
     char prompt[PROMPT_SIZE]; /* custom prompt string */
+    char key[KEY_SIZE];
     uint8_t clear_mode; /* is clear mode enabled? */
     uint8_t transient_mode; /* is transient mode enabled? */
     uint8_t urgent_mode; /* urgent mode */
@@ -132,6 +132,23 @@ void ignore_signal(int signum)
 {
 }
 
+void update_prompt(void)
+{
+    printf ("%s", CLEAR_LINE);
+    if (g_client_state.num_pending_msg > 0) {
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "*(%u)%s%s> ",\
+            g_client_state.num_pending_msg,
+            g_client_state.clear_mode ? "!" : "",
+            g_client_state.key);
+    } else {
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "%s%s> ",\
+            g_client_state.clear_mode ? "!" : "",
+            g_client_state.key);
+    }
+    rl_set_prompt(g_client_state.prompt);
+    rl_redisplay();
+}
+
 void write_msg(int fd, struct msg *msg)
 {
     int total_written = 0, bytes_written;
@@ -159,7 +176,6 @@ int read_msg(int fd, struct msg *msg)
 
     return total_read;
 }
-
 
 void clear_history(void)
 {
@@ -240,7 +256,7 @@ void process_message(struct msg *msg)
         add_new_message(msg);
         if (g_client_state.clear_mode) {
             g_client_state.num_pending_msg++;
-            //update_prompt();
+            update_prompt();
         }
         break;
     default:
@@ -377,14 +393,6 @@ void update_display(void)
     fflush(stdout);
 }
 
-void update_prompt(void)
-{
-    printf ("%s", CLEAR_LINE);
-    snprintf(g_client_state.prompt, PROMPT_SIZE-1, "> ");
-    rl_set_prompt(g_client_state.prompt);
-    rl_redisplay() ;
-}
-
 void window_resized(int signum)
 {
     pthread_mutex_lock(&msg_mutex);
@@ -483,7 +491,7 @@ void *server_thread(void *arg)
                             }
                             /* did we survive the duplicate nick check? */
                             if (msg.type == MSG_JOIN) {
-                                snprintf(nicks[i], NICK_SIZE-1, "%s", msg.nick);
+                                snprintf(nicks[i], NICK_SIZE, "%s", msg.nick);
                                 /* ensure null-terminated */
                                 snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i]);
                             }
@@ -628,11 +636,24 @@ void *user_input_thread(void *arg)
             case 'C':
                 pthread_mutex_lock(&msg_mutex);
                 clear_history();
+                g_client_state.num_pending_msg = 0;
+                update_prompt();
                 update_display();
                 pthread_mutex_unlock(&msg_mutex);
                 msg.type = MSG_CLEAR_HISTORY;
                 msg.time = time(NULL);
                 write_msg(fd, &msg);
+                continue;
+            case 'c':
+                pthread_mutex_lock(&msg_mutex);
+                g_client_state.clear_mode = ~g_client_state.clear_mode;
+                if (!g_client_state.clear_mode) {
+                    g_client_state.num_pending_msg = 0;
+                }
+                clear_display();
+                update_prompt();
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
                 continue;
             default:
                 break;
@@ -786,16 +807,18 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
         snprintf(sockpath, sizeof(sockpath), comms_dir_template);
-        snprintf(g_client_state.prompt, PROMPT_SIZE, "%s> ", &comms_dir_template[11]);
+        snprintf(g_client_state.key, KEY_SIZE, "%s", &comms_dir_template[11]);
     } else {
         if (strlen(response) != 6) {
             printf("invalid key, goodbye!\n");
             exit(EXIT_FAILURE);
         } else {
             snprintf(sockpath, sizeof(sockpath), "/tmp/comms.%s", response);
-            snprintf(g_client_state.prompt, PROMPT_SIZE, "%s> ", response);
+            snprintf(g_client_state.key, KEY_SIZE, "%s", response);
         }
     }
+
+    update_prompt();
 
     if (response) {
         free(response);
