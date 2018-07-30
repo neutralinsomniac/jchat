@@ -16,104 +16,7 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
-#define COMMS_DIR_TEMPLATE "/tmp/comms.XXXXXX"
-#define JCHAT_SOCK_FILENAME "/jchat.sock"
-#define JCHAT_SOCK_FORMAT "%s" JCHAT_SOCK_FILENAME
-
-#define BUF_SIZE 1024
-#define MSG_SIZE 4096
-#define KEY_SIZE 7
-#define MAX_CONNECT_RETRIES 10
-#define PROMPT_SIZE 32
-#define NICK_SIZE 16
-#define MAX_USERS 32
-#define MAX_DISPLAY_MESSAGES 200
-#define LINE_UP "\033[1F"
-#define CLEAR_LINE "\033[K"
-#define SAVE_CURSOR "\0337"
-#define RESTORE_CURSOR "\0338"
-#define CLEAR_SCREEN "\033[2J"
-// for PuTTY. stupid...
-#define CLEAR_SCROLLBACK "\033[3J"
-#define VISIBLE_BEEP "\x07"
-#define RESET_TERM "\033c"
-#define CHANGE_TITLE_FORMAT "\033]2;%s\007"
-#define CHANGE_TITLE_IS_TYPING_FORMAT "\033]2;%s...\007"
-
-#define COLOR_NONE "\033[0m"
-#define COLOR_RED "\033[31m"
-#define COLOR_GREEN "\033[32m"
-#define COLOR_YELLOW "\033[33m"
-#define COLOR_CYAN "\033[36m"
-
-/* ui commands */
-#define UI_CMD_SIZE 3
-#define UI_CHANGE_PROMPT_CMD "p"
-#define UI_CHANGE_TITLE_CMD "t"
-#define UI_CLEAR_CMD "c"
-#define UI_CLEAR_HISTORY_CMD "C"
-#define UI_CYCLE_URGENT_MODE_CMD "u"
-#define UI_HELP_CMD "h"
-#define UI_MARK_CMD "m"
-#define UI_QUIT_CMD "q"
-#define UI_REDACT_CMD "-"
-#define UI_RESET_CMD "r"
-
-/* TODO how will we use these (if it all)? */
-#define TYPING_START_CMD '\\'
-#define TYPING_END_CMD '/'
-#define TYPING_STALLED_CMD '|'
-
-enum msg_type {
-    MSG_NORMAL,
-    MSG_JOIN,
-    MSG_JOIN_REJECTED,
-    MSG_REDACT,
-    MSG_CLEAR_HISTORY,
-    MSG_MARK,
-    MSG_QUIT
-};
-
-enum join_state {
-    JOIN_PENDING = 0,
-    JOIN_REJECTED,
-    JOINED
-};
-
-enum urgent_type {
-    URGENT_ALL = 0,
-    URGENT_MSG_ONLY = 1,
-    URGENT_NONE = 2
-};
-
-struct client_state {
-    enum join_state join_state;
-    int user_id;
-    char prompt[PROMPT_SIZE]; /* custom prompt string */
-    char key[KEY_SIZE];
-    uint8_t clear_mode; /* is clear mode enabled? */
-    uint8_t transient_mode; /* is transient mode enabled? */
-    uint8_t urgent_mode; /* urgent mode */
-    uint32_t num_pending_msg;
-    uint8_t should_exit;
-};
-
-/* this is what gets passed on the wire */
-__attribute__((packed)) struct msg {
-    enum msg_type type;
-    time_t time;
-    int user_id;
-    char nick[NICK_SIZE];
-    char msg[MSG_SIZE];
-};
-
-/* this is what gets stored in the client(s) */
-struct node {
-    struct msg msg; /* note: this is *NOT* packed */
-    struct node *next;
-    struct node *prev;
-};
-
+#include "newchat.h"
 
 pthread_mutex_t msg_mutex;
 pthread_t pt_user_input, pt_server_processing, pt_server;
@@ -123,10 +26,6 @@ struct node *tail = NULL;
 struct winsize w;
 
 static struct client_state g_client_state = {0};
-
-void update_display(void);
-void clear_display(void);
-void add_new_message(struct msg *);
 
 void ignore_signal(int signum)
 {
@@ -247,24 +146,6 @@ void copy_msg(struct node *dst, struct msg *src)
     dst->msg.type = src->type;
 }
 
-void process_message(struct msg *msg)
-{
-    switch(msg->type) {
-    case MSG_NORMAL:
-    case MSG_JOIN:
-    case MSG_CLEAR_HISTORY:
-    case MSG_QUIT:
-        add_new_message(msg);
-        if (g_client_state.clear_mode) {
-            g_client_state.num_pending_msg++;
-            update_prompt();
-        }
-        break;
-    default:
-        /* ??? */
-        break;
-    }
-}
 
 void add_new_message(struct msg *msg)
 {
@@ -394,6 +275,33 @@ void update_display(void)
     fflush(stdout);
 }
 
+int redact_message(int user_id) 
+{
+    struct node *iter;
+    int found =  0;
+
+    if (!tail) {
+        return found;
+    }
+
+    iter = tail; 
+    while (iter) {
+        if (iter->msg.user_id == user_id && iter->msg.type == MSG_NORMAL) {
+            delete_node(iter);
+            iter = NULL;
+            found = 1; 
+        } else {
+            iter = iter->prev;
+        }
+    }
+
+    if (found) {
+        update_display();
+    }
+
+    return found;
+}
+
 void window_resized(int signum)
 {
     pthread_mutex_lock(&msg_mutex);
@@ -401,6 +309,32 @@ void window_resized(int signum)
     update_display();
     rl_redisplay();
     pthread_mutex_unlock(&msg_mutex);
+}
+
+void process_message(struct msg *msg)
+{
+    switch(msg->type) {
+    case MSG_NORMAL:
+    case MSG_JOIN:
+    case MSG_CLEAR_HISTORY:
+    case MSG_QUIT:
+        add_new_message(msg);
+        if (g_client_state.clear_mode) {
+            g_client_state.num_pending_msg++;
+            update_prompt();
+        }
+        break;
+    case MSG_REDACT:
+        if (redact_message(msg->user_id)) {
+            if (g_client_state.num_pending_msg > 0) {
+                g_client_state.num_pending_msg--;
+                update_prompt();
+            }
+        }
+    default:
+        /* ??? */
+        break;
+    }
 }
 
 void *server_thread(void *arg)
@@ -518,6 +452,7 @@ void *server_thread(void *arg)
                         }
                         remove = 1;
                         break;
+                    case MSG_REDACT:
                     case MSG_NORMAL:
                         break;
                     default:
@@ -656,6 +591,11 @@ void *user_input_thread(void *arg)
                 update_display();
                 pthread_mutex_unlock(&msg_mutex);
                 continue;
+            case '-':
+                msg.type = MSG_REDACT;
+                msg.time = time(NULL);
+                write_msg(fd, &msg);
+                continue;
             default:
                 break;
             }
@@ -793,7 +733,7 @@ int main(int argc, char **argv)
     };
 
     if (argc != 1) {
-        printf("usage: %\n", argv[0]);
+        printf("usage: %s\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
@@ -807,7 +747,7 @@ int main(int argc, char **argv)
             perror("mkdtemp");
             exit(EXIT_FAILURE);
         }
-        snprintf(sockpath, sizeof(sockpath), comms_dir_template);
+        snprintf(sockpath, sizeof(sockpath), "%s", comms_dir_template);
         snprintf(g_client_state.key, KEY_SIZE, "%s", &comms_dir_template[11]);
     } else {
         if (strlen(response) != 6) {
@@ -827,7 +767,7 @@ int main(int argc, char **argv)
 
     strcat(sockpath, JCHAT_SOCK_FILENAME);
 
-    snprintf(sock.sun_path, sizeof(sock.sun_path), sockpath);
+    snprintf(sock.sun_path, sizeof(sock.sun_path), "%s", sockpath);
 
     if (is_server) {
         pthread_create(&pt_server, NULL, &server_thread, &sock);
