@@ -337,7 +337,7 @@ void process_message(struct msg *msg)
     }
 }
 
-void *server_thread(void *arg)
+void * server_thread(void *arg)
 {
     int fd, client_fd;
     struct sockaddr_un client_sock;
@@ -503,7 +503,7 @@ void *server_thread(void *arg)
     pthread_exit(EXIT_SUCCESS);
 }
 
-void *user_input_thread(void *arg)
+void * user_input_thread(void *arg)
 {
     int fd = *(int *)arg;
     struct msg msg = {0};
@@ -622,7 +622,7 @@ void *user_input_thread(void *arg)
     pthread_exit(EXIT_SUCCESS);
 }
 
-void *server_processing_thread(void *arg)
+void * server_processing_thread(void *arg)
 {
     int fd = *(int *)arg;
 
