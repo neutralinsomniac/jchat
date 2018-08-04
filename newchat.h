@@ -32,17 +32,16 @@
 #define COLOR_CYAN "\033[36m"
 
 /* ui commands */
-#define UI_CMD_SIZE 3
-#define UI_CHANGE_PROMPT_CMD "p"
-#define UI_CHANGE_TITLE_CMD "t"
-#define UI_CLEAR_CMD "c"
-#define UI_CLEAR_HISTORY_CMD "C"
-#define UI_CYCLE_URGENT_MODE_CMD "u"
-#define UI_HELP_CMD "h"
-#define UI_MARK_CMD "m"
-#define UI_QUIT_CMD "q"
-#define UI_REDACT_CMD "-"
-#define UI_RESET_CMD "r"
+#define UI_CHANGE_PROMPT_CMD 'p'
+#define UI_CHANGE_TITLE_CMD 't'
+#define UI_CLEAR_CMD 'c'
+#define UI_CLEAR_HISTORY_CMD 'C'
+#define UI_CYCLE_URGENT_MODE_CMD 'u'
+#define UI_HELP_CMD 'h'
+#define UI_MARK_CMD 'm'
+#define UI_QUIT_CMD 'q'
+#define UI_REDACT_CMD '-'
+#define UI_RESET_CMD 'r'
 
 /* TODO how will we use these (if it all)? */
 #define TYPING_START_CMD '\\'

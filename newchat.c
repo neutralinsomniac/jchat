@@ -566,10 +566,10 @@ void * user_input_thread(void *arg)
         /* single letter command */
         case 1:
             switch (rl_str[0]) {
-            case 'q':
+            case UI_QUIT_CMD:
                 g_client_state.should_exit = 1;
                 continue;
-            case 'C':
+            case UI_CLEAR_HISTORY_CMD:
                 pthread_mutex_lock(&msg_mutex);
                 clear_history();
                 g_client_state.num_pending_msg = 0;
@@ -580,7 +580,7 @@ void * user_input_thread(void *arg)
                 msg.time = time(NULL);
                 write_msg(fd, &msg);
                 continue;
-            case 'c':
+            case UI_CLEAR_CMD:
                 pthread_mutex_lock(&msg_mutex);
                 g_client_state.clear_mode = ~g_client_state.clear_mode;
                 if (!g_client_state.clear_mode) {
@@ -591,7 +591,7 @@ void * user_input_thread(void *arg)
                 update_display();
                 pthread_mutex_unlock(&msg_mutex);
                 continue;
-            case '-':
+            case UI_REDACT_CMD:
                 msg.type = MSG_REDACT;
                 msg.time = time(NULL);
                 write_msg(fd, &msg);
