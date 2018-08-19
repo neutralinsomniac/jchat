@@ -4,6 +4,7 @@
 #define COMMS_DIR_TEMPLATE "/tmp/comms.XXXXXX"
 #define JCHAT_SOCK_FILENAME "/jchat.sock"
 #define JCHAT_SOCK_FORMAT "%s" JCHAT_SOCK_FILENAME
+#define MSG_MARK_STR "----- mark -----"
 
 #define BUF_SIZE 1024
 #define MSG_SIZE 4096

@@ -33,19 +33,18 @@ void ignore_signal(int signum)
 
 void update_prompt(void)
 {
-    printf ("%s", CLEAR_LINE);
+    printf("%s", CLEAR_LINE);
     if (g_client_state.num_pending_msg > 0) {
-        snprintf(g_client_state.prompt, PROMPT_SIZE, "*(%u)%s%s> ",\
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "*(%u)%s%s> ",
             g_client_state.num_pending_msg,
             g_client_state.clear_mode ? "!" : "",
             g_client_state.key);
     } else {
-        snprintf(g_client_state.prompt, PROMPT_SIZE, "%s%s> ",\
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "%s%s> ",
             g_client_state.clear_mode ? "!" : "",
             g_client_state.key);
     }
     rl_set_prompt(g_client_state.prompt);
-    rl_redisplay();
 }
 
 void write_msg(int fd, struct msg *msg)
@@ -275,7 +274,7 @@ void update_display(void)
     fflush(stdout);
 }
 
-int redact_message(int user_id) 
+int redact_message(int user_id)
 {
     struct node *iter;
     int found =  0;
@@ -284,12 +283,12 @@ int redact_message(int user_id)
         return found;
     }
 
-    iter = tail; 
+    iter = tail;
     while (iter) {
         if (iter->msg.user_id == user_id && iter->msg.type == MSG_NORMAL) {
             delete_node(iter);
             iter = NULL;
-            found = 1; 
+            found = 1;
         } else {
             iter = iter->prev;
         }
@@ -319,9 +318,10 @@ void process_message(struct msg *msg)
     case MSG_CLEAR_HISTORY:
     case MSG_QUIT:
         add_new_message(msg);
-        if (g_client_state.clear_mode) {
+        if (g_client_state.clear_mode && msg->user_id != g_client_state.user_id) {
             g_client_state.num_pending_msg++;
             update_prompt();
+            rl_redisplay();
         }
         break;
     case MSG_REDACT:
@@ -329,6 +329,7 @@ void process_message(struct msg *msg)
             if (g_client_state.num_pending_msg > 0) {
                 g_client_state.num_pending_msg--;
                 update_prompt();
+                rl_redisplay();
             }
         }
     default:
@@ -503,6 +504,22 @@ void * server_thread(void *arg)
     pthread_exit(EXIT_SUCCESS);
 }
 
+void remove_mark_message()
+{
+    struct node *iter;
+
+    iter = root;
+
+    while (iter) {
+        if (iter->msg.type == MSG_MARK) {
+            delete_node(iter);
+            iter = NULL;
+        } else {
+            iter = iter->next;
+        }
+    }
+}
+
 void * user_input_thread(void *arg)
 {
     int fd = *(int *)arg;
@@ -547,13 +564,14 @@ void * user_input_thread(void *arg)
     }
 
     using_history();
-    clear_display();
     pthread_mutex_lock(&msg_mutex);
+    clear_display();
     update_display();
     pthread_mutex_unlock(&msg_mutex);
 
     /* main msg processing loop */
     while (!g_client_state.should_exit && (rl_str = readline(g_client_state.prompt)) != NULL) {
+        memset(&msg, 0, sizeof(struct msg));
         switch (strlen(rl_str)) {
         /* user pressed enter with no text entered; do a full screen refresh */
         case 0:
@@ -562,7 +580,6 @@ void * user_input_thread(void *arg)
             update_display();
             pthread_mutex_unlock(&msg_mutex);
             continue;
-            break;
         /* single letter command */
         case 1:
             switch (rl_str[0]) {
@@ -573,8 +590,9 @@ void * user_input_thread(void *arg)
                 pthread_mutex_lock(&msg_mutex);
                 clear_history();
                 g_client_state.num_pending_msg = 0;
-                update_prompt();
+                clear_display();
                 update_display();
+                update_prompt();
                 pthread_mutex_unlock(&msg_mutex);
                 msg.type = MSG_CLEAR_HISTORY;
                 msg.time = time(NULL);
@@ -585,6 +603,12 @@ void * user_input_thread(void *arg)
                 g_client_state.clear_mode = ~g_client_state.clear_mode;
                 if (!g_client_state.clear_mode) {
                     g_client_state.num_pending_msg = 0;
+                } else {
+                    msg.type = MSG_MARK;
+                    msg.time = time(NULL);
+                    strncpy(msg.msg, MSG_MARK_STR, MSG_SIZE-1);
+                    remove_mark_message();
+                    add_new_message(&msg);
                 }
                 clear_display();
                 update_prompt();
@@ -595,6 +619,21 @@ void * user_input_thread(void *arg)
                 msg.type = MSG_REDACT;
                 msg.time = time(NULL);
                 write_msg(fd, &msg);
+                pthread_mutex_lock(&msg_mutex);
+                printf("%s", CLEAR_LINE);
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
+                continue;
+            case UI_MARK_CMD:
+                msg.type = MSG_MARK;
+                msg.time = time(NULL);
+                strncpy(msg.msg, MSG_MARK_STR, MSG_SIZE-1);
+                pthread_mutex_lock(&msg_mutex);
+                printf("%s", CLEAR_LINE);
+                remove_mark_message();
+                add_new_message(&msg);
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
                 continue;
             default:
                 break;
@@ -604,20 +643,28 @@ void * user_input_thread(void *arg)
 
         }
 
-        memset(&msg, 0, sizeof(struct msg));
+        /* forward message to server */
+        pthread_mutex_lock(&msg_mutex);
+        printf("%s", CLEAR_LINE);
+        if (!g_client_state.clear_mode) {
+            remove_mark_message();
+        }
+        update_display();
+        pthread_mutex_unlock(&msg_mutex);
         strncpy(msg.msg, rl_str, MSG_SIZE-1);
         msg.time = time(NULL);
         msg.type = MSG_NORMAL;
         write_msg(fd, &msg);
         add_history(rl_str);
         free(rl_str);
-        printf("%s", CLEAR_LINE);
     }
 
+    /* send quit message to server before exiting */
     memset(&msg, 0, sizeof(struct msg));
     msg.time = time(NULL);
     msg.type = MSG_QUIT;
     write_msg(fd, &msg);
+    rl_clear_history();
     g_client_state.should_exit = 1;
     pthread_exit(EXIT_SUCCESS);
 }
