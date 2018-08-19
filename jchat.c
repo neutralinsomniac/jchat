@@ -72,7 +72,7 @@ enum msg_type {
 
 enum urgent_type {
     URGENT_ALL = 0,
-    URGENT_MSG_ONLY	= 1,
+    URGENT_MSG_ONLY = 1,
     URGENT_NONE = 2
 };
 
@@ -116,7 +116,7 @@ void cycle_urgent_mode() {
 int check_typing()
 {
     if (rl_end == prev_rl_end) {
-        typing_timer++ ;
+        typing_timer++;
     } else {
         typing_timer = 0;
         prev_rl_end = rl_end;
@@ -173,13 +173,13 @@ void get_prompt(char *prompt)
     }
 
     if (pending_msg > 0) {
-        snprintf(prompt, BUFSIZE, "*(%u)%s%s%s%s%c ", 
+        snprintf(prompt, BUFSIZE, "*(%u)%s%s%s%s%c ",
                 pending_msg, (transient_mode) ? "~" : "",
                 (them_clear) ? "^" : "", (clear) ? "!" : "",
                 custom_prompt, them_typing_indicator);
     } else {
 
-        snprintf(prompt, BUFSIZE, "%s%s%s%s%c ", 
+        snprintf(prompt, BUFSIZE, "%s%s%s%s%c ",
                 (transient_mode) ? "~" : "",
                 (them_clear) ? "^" : "", (clear) ? "!" : "",
                 custom_prompt, them_typing_indicator);
@@ -193,7 +193,7 @@ void update_prompt()
     printf ("%s", CLEAR_LINE);
     get_prompt(prompt);
     rl_set_prompt(prompt);
-    rl_redisplay() ;
+    rl_redisplay();
 }
 
 void window_resized(int signum)
@@ -293,14 +293,14 @@ void update_display()
                 break;
             case THEM:
                 printf("%s", COLOR_YELLOW);
-                printf("%s: %s", other_name, iter->msg);  
-                break ;
+                printf("%s: %s", other_name, iter->msg);
+                break;
             case STATUS:
-                printf("%s", COLOR_NONE); 
-                printf("%s", iter->msg); 
+                printf("%s", COLOR_NONE);
+                printf("%s", iter->msg);
                 break;
         }
-        printf("%s", COLOR_NONE) ;
+        printf("%s", COLOR_NONE);
         printf("\n");
         iter = iter->next;
         fflush(stdout);
@@ -319,12 +319,12 @@ int redact_last_msg(enum msg_type type) {
         return found;
     }
 
-    iter = tail; 
+    iter = tail;
     while (iter) {
         if (iter->type == type) {
             delete_node(iter);
             iter = NULL;
-            found = 1; 
+            found = 1;
         } else {
             iter = iter->prev;
         }
@@ -572,7 +572,7 @@ void *reader(void *arg)
                     printf("%s", VISIBLE_BEEP);
                     fflush(stdout);
                 }
-                pthread_mutex_unlock(&msg_mutex) ;
+                pthread_mutex_unlock(&msg_mutex);
             }
 
             free(msg_assembled);
@@ -639,7 +639,7 @@ void *writer(void *arg)
                 free(msg);
             msg = readline("new window title: ");
             snprintf(window_title, sizeof(window_title), "%s", msg);
-            printf(CHANGE_TITLE_FORMAT, window_title) ;
+            printf(CHANGE_TITLE_FORMAT, window_title);
             fflush(stdout);
         } else if (strncmp(CYCLE_URGENT_MODE_CMD, msg, CMD_SIZE) == 0) {
             cycle_urgent_mode();
@@ -759,7 +759,7 @@ int main(int argc, char *argv[])
     FILE *startupfp;
     FILE *lockfp;
 
-    if	(argc != 1)  {
+    if    (argc != 1)  {
         printf("usage : %s\n", argv[0]);
         return 1;
     }
@@ -820,7 +820,7 @@ int main(int argc, char *argv[])
             if (startupfp) {
                 fflush(NULL);
                 fscanf(startupfp, "%*d\n");
-                fclose(startupfp) ;
+                fclose(startupfp);
             } else {
                 printf("error opening startup file for reading\n");
                 return 1;
@@ -834,7 +834,7 @@ int main(int argc, char *argv[])
         startupfp = fopen(a_filename, "w");
         if (startupfp) {
             fprintf(startupfp, "1\n");
-            fclose(startupfp) ;
+            fclose(startupfp);
         } else {
             printf("error opening startup file for writing\n");
             return 1;
@@ -868,7 +868,7 @@ int main(int argc, char *argv[])
 
     // startup threads
     pthread_create(&pt_reader, NULL, &reader, NULL);
-    pthread_create(&pt_writer, NULL, &writer, NULL) ;
+    pthread_create(&pt_writer, NULL, &writer, NULL);
 
     pthread_join(pt_writer, &res);
     free(res);
