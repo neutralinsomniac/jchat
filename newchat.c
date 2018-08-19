@@ -585,6 +585,7 @@ void * user_input_thread(void *arg)
             switch (rl_str[0]) {
             case UI_QUIT_CMD:
                 g_client_state.should_exit = 1;
+                printf("%s", CLEAR_LINE);
                 continue;
             case UI_CLEAR_HISTORY_CMD:
                 pthread_mutex_lock(&msg_mutex);
@@ -616,13 +617,13 @@ void * user_input_thread(void *arg)
                 pthread_mutex_unlock(&msg_mutex);
                 continue;
             case UI_REDACT_CMD:
-                msg.type = MSG_REDACT;
-                msg.time = time(NULL);
-                write_msg(fd, &msg);
                 pthread_mutex_lock(&msg_mutex);
                 printf("%s", CLEAR_LINE);
                 update_display();
                 pthread_mutex_unlock(&msg_mutex);
+                msg.type = MSG_REDACT;
+                msg.time = time(NULL);
+                write_msg(fd, &msg);
                 continue;
             case UI_MARK_CMD:
                 msg.type = MSG_MARK;
