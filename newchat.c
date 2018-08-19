@@ -326,7 +326,7 @@ void process_message(struct msg *msg)
         break;
     case MSG_REDACT:
         if (redact_message(msg->user_id)) {
-            if (g_client_state.num_pending_msg > 0) {
+            if (g_client_state.num_pending_msg > 0 && msg->user_id != g_client_state.user_id) {
                 g_client_state.num_pending_msg--;
                 update_prompt();
                 rl_redisplay();
