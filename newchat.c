@@ -18,7 +18,9 @@
 
 #include "newchat.h"
 
-pthread_mutex_t msg_mutex;
+pthread_mutex_t msg_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t exit_wait_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t exit_wait_cond = PTHREAD_COND_INITIALIZER;
 pthread_t pt_user_input, pt_server_processing, pt_server;
 
 struct node *root = NULL;
@@ -667,6 +669,7 @@ void * user_input_thread(void *arg)
     write_msg(fd, &msg);
     rl_clear_history();
     g_client_state.should_exit = 1;
+    pthread_cond_signal(&exit_wait_cond);
     pthread_exit(EXIT_SUCCESS);
 }
 
@@ -709,6 +712,7 @@ void * server_processing_thread(void *arg)
     }
 
     g_client_state.should_exit = 1;
+    pthread_cond_signal(&exit_wait_cond);
     pthread_exit(EXIT_SUCCESS);
 }
 
@@ -756,9 +760,11 @@ void client(const struct sockaddr_un *sock)
     pthread_create(&pt_user_input, NULL, &user_input_thread, (void*)&fd);
     pthread_create(&pt_server_processing, NULL, &server_processing_thread, (void*)&fd);
 
+    pthread_mutex_lock(&exit_wait_mutex);
     while (!g_client_state.should_exit) {
-        sleep(1);
+        pthread_cond_wait(&exit_wait_cond, &exit_wait_mutex);
     }
+    pthread_mutex_unlock(&exit_wait_mutex);
 
     // one of our threads signaled exit; signal our other thread(s) to exit
     pthread_kill(pt_server_processing, SIGUSR1);
