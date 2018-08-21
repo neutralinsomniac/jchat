@@ -1,2 +1,1 @@
 - change main() sleep() to pthread event (start locked/unlock when one of the threads exits)
-- add mark
