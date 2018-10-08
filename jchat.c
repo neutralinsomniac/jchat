@@ -1,215 +1,125 @@
-#include <stdio.h>
-#include <pthread.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <time.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <unistd.h>
+
 #include <readline/readline.h>
 #include <readline/history.h>
-#include <signal.h>
 
-#define BUFSIZE 1024
-#define MAX_DISPLAY_MESSAGES 200
-#define LINE_UP "\033[1F"
-#define CLEAR_LINE "\033[K"
-#define SAVE_CURSOR "\0337"
-#define RESTORE_CURSOR "\0338"
-#define CLEAR_SCREEN "\033[2J"
-// for PuTTY. stupid...
-#define CLEAR_SCROLLBACK "\033[3J"
-#define VISIBLE_BEEP "\x07"
-#define RESET_TERM "\033c"
-#define CHANGE_TITLE_FORMAT "\033]2;%s\007"
-#define CHANGE_TITLE_IS_TYPING_FORMAT "\033]2;%s...\007"
+#include "jchat.h"
 
-#define COLOR_NONE "\033[0m"
-#define COLOR_RED "\033[31m"
-#define COLOR_GREEN "\033[32m"
-#define COLOR_YELLOW "\033[33m"
-#define COLOR_CYAN "\033[36m"
-
-#define MSG_MARK "----- mark -----"
-#define MSG_HISTORY_CLEARED "other side cleared history"
-
-#define CMD_SIZE 3
-#define CLEAR_CMD "c"
-#define QUIT_CMD "q"
-#define RESET_CMD "r"
-#define CLEAR_HISTORY_CMD "C"
-#define CHANGE_TITLE_CMD "t"
-#define REDACT_CMD "-"
-
-#define CHANGE_PROMPT_CMD "p"
-#define CHANGE_OTHER_NAME_CMD "n"
-#define MARK_CMD "m"
-#define HELP_CMD "h"
-#define TYPING_START_CMD "\x01\\"
-#define TYPING_END_CMD "\x01/"
-#define TYPING_STALLED_CMD "\x01|"
-#define CYCLE_URGENT_MODE_CMD "u"
-
-static int is_a = 0;
-static int transient_mode = 0;
-
-char custom_prompt[BUFSIZE];
-char log_filename [BUFSIZE];
-char a_filename [BUFSIZE];
-char b_filename [BUFSIZE];
-char lock_filename[BUFSIZE];
-char dirname[BUFSIZE];
-char other_name[BUFSIZE];
-char window_title[BUFSIZE];
-
-enum msg_type {
-    ME,
-    THEM,
-    STATUS
-};
-
-enum urgent_type {
-    URGENT_ALL = 0,
-    URGENT_MSG_ONLY = 1,
-    URGENT_NONE = 2
-};
-
-#define NUM_URGENT_MODES 3
-
-struct node {
-    char *msg;
-    enum msg_type type;
-    time_t time;
-    struct node *next;
-    struct node *prev;
-};
-
-pthread_mutex_t msg_mutex;
-pthread_t pt_reader, pt_writer;
+pthread_mutex_t msg_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t exit_wait_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t exit_wait_cond = PTHREAD_COND_INITIALIZER;
+pthread_t pt_user_input, pt_server_processing, pt_server;
 
 struct node *root = NULL;
 struct node *tail = NULL;
 struct winsize w;
 
-int clear = 0;
-int them_clear = 0;
-int pending_msg = 0;
-int us_typing = 0;
-int them_typing = 0;
-int current_urgent_mode = URGENT_MSG_ONLY;
-int typing_timer = 0;
-int prev_rl_end = 0;
-int stall_sent = 0;
+static struct client_state g_client_state = {0};
 
-void update_display();
-void clear_display();
-void update_prompt();
-
-FILE* writer_fp;
-
-void cycle_urgent_mode() {
-    current_urgent_mode = (current_urgent_mode + 1) % NUM_URGENT_MODES;
+void ignore_signal(int signum)
+{
 }
 
-int check_typing()
+void update_prompt(void)
 {
-    if (rl_end == prev_rl_end) {
-        typing_timer++;
+    printf("%s", CLEAR_LINE);
+    if (g_client_state.num_pending_msg > 0) {
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "*(%u)%s%s> ",
+            g_client_state.num_pending_msg,
+            g_client_state.clear_mode ? "!" : "",
+            g_client_state.key);
     } else {
-        typing_timer = 0;
-        prev_rl_end = rl_end;
-        stall_sent = 0;
+        snprintf(g_client_state.prompt, PROMPT_SIZE, "%s%s> ",
+            g_client_state.clear_mode ? "!" : "",
+            g_client_state.key);
     }
-
-    if (rl_end > 0 && (us_typing == 0 || typing_timer <= 30)) {
-        us_typing = 1;
-        stall_sent = 0;
-        fprintf(writer_fp, "%s\n", TYPING_START_CMD);
-        fflush(writer_fp);
-    } else if (rl_end == 0 && us_typing == 1) {
-
-        us_typing = 0;
-        stall_sent = 0;
-        fprintf(writer_fp, "%s\n", TYPING_END_CMD);
-        fflush(writer_fp);
-    } else if (typing_timer > 30 && us_typing == 1 && stall_sent != 1) {
-        fprintf(writer_fp, "%s\n", TYPING_STALLED_CMD);
-        fflush(writer_fp);
-        stall_sent = 1;
-    }
-
-    return 0;
+    rl_set_prompt(g_client_state.prompt);
 }
 
-void cleanup ()
+void write_msg(int fd, struct msg *msg)
 {
-    // reset terminal
+    int total_written = 0, bytes_written;
+    while (total_written < sizeof(struct msg)) {
+        bytes_written = write(fd, ((char *)msg) + total_written, sizeof(struct msg) - total_written);
+        if (bytes_written > 0) {
+            total_written += bytes_written;
+        } else {
+            break;
+        }
+    }
+}
+
+int read_msg(int fd, struct msg *msg)
+{
+    int total_read = 0, bytes_read;
+    while (total_read < sizeof(struct msg)) {
+        bytes_read = read(fd, ((char *)msg) + total_read, sizeof(struct msg) - total_read);
+        if (bytes_read > 0) {
+            total_read += bytes_read;
+        } else {
+            break;
+        }
+    }
+
+    return total_read;
+}
+
+void clear_history(void)
+{
+    struct node *iter;
+    struct node *next;
+
+    if (!root) {
+        return;
+    }
+
+    iter = root;
+
+    while (iter) {
+        next = iter->next;
+        memset(iter, 0, sizeof(struct node));
+        free(iter);
+        iter = next;
+    }
+    root = NULL;
+    tail = NULL;
+
+    rl_clear_history();
+}
+
+void clear_display(void)
+{
     printf("%s", RESET_TERM);
     printf("%s", CLEAR_SCROLLBACK);
     printf("%s", CLEAR_SCREEN);
+    // get window size
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
 
-    unlink(a_filename);
-    unlink(b_filename);
-    unlink(lock_filename);
-    rmdir(dirname);
-}
+    // set scrollable region
+    printf("\033[(1;%ur", w.ws_row - 1);
 
-void get_prompt(char *prompt)
-{
-    char them_typing_indicator;
-
-    switch (them_typing) {
-        case 0:
-            them_typing_indicator = '>';
-            break;
-        case 1:
-            them_typing_indicator = '.';
-            break;
-        case 2:
-            them_typing_indicator = '-';
-            break;
-    }
-
-    if (pending_msg > 0) {
-        snprintf(prompt, BUFSIZE, "*(%u)%s%s%s%s%c ",
-                pending_msg, (transient_mode) ? "~" : "",
-                (them_clear) ? "^" : "", (clear) ? "!" : "",
-                custom_prompt, them_typing_indicator);
-    } else {
-
-        snprintf(prompt, BUFSIZE, "%s%s%s%s%c ",
-                (transient_mode) ? "~" : "",
-                (them_clear) ? "^" : "", (clear) ? "!" : "",
-                custom_prompt, them_typing_indicator);
-    }
-}
-
-void update_prompt()
-{
-    char prompt[BUFSIZE];
-
-    printf ("%s", CLEAR_LINE);
-    get_prompt(prompt);
-    rl_set_prompt(prompt);
-    rl_redisplay();
-}
-
-void window_resized(int signum)
-{
-    pthread_mutex_lock(&msg_mutex);
-    clear_display();
-    update_display();
-    rl_redisplay();
-    pthread_mutex_unlock(&msg_mutex);
+    // position cursor
+    printf("\033[%u;1f", w.ws_row);
+    fflush(stdout);
 }
 
 void delete_node(struct node *node)
 {
     if (node == NULL)
         return;
-
 
     if (node->next) {
         (node->next)->prev = node->prev;
@@ -223,196 +133,22 @@ void delete_node(struct node *node)
     if (node == root) {
         root = node->next;
     }
-    memset(node->msg, 0, strlen(node->msg));
-    free(node->msg);
     memset(node, 0, sizeof(struct node));
     free(node);
     node = NULL;
 }
 
-void update_display()
+void copy_msg(struct node *dst, struct msg *src)
 {
-    int count = 0, i;
-    struct node *iter;
-    struct tm timeinfo;
-    struct tm now;
-    time_t now_time;
-    char time_str[BUFSIZE];
-    char *newline;
-
-    // save cursor
-    printf("%s", SAVE_CURSOR);
-    fflush(stdout);
-
-    // first, count # of messages to print
-    iter = root;
-    while (iter != NULL && count < MAX_DISPLAY_MESSAGES) {
-        iter = iter->next;
-        count++;
-    }
-
-    // clear screen (skipping input bar)
-    for (i = w.ws_row; i != 0; i--) {
-        printf("%s", LINE_UP);
-        printf("%s", CLEAR_LINE);
-    }
-
-    printf("%s", RESTORE_CURSOR);
-
-
-    if (clear) {
-        return;
-    }
-
-    // navigate backwards to the beginning of what we want to print
-    iter = tail;
-    for (; count != 0; count--) {
-        printf("%s", LINE_UP);
-        if (iter->prev != NULL) {
-            iter = iter->prev;
-        }
-    }
-
-    // print messages!
-    while (iter != NULL) {
-        localtime_r(&iter->time, &timeinfo);
-        now_time = time(NULL);
-        localtime_r(&now_time, &now);
-        if (now.tm_year == timeinfo.tm_year &&
-                now.tm_mon == timeinfo.tm_mon &&
-                now.tm_mday == timeinfo.tm_mday) {
-            strftime(time_str, sizeof(time_str), "%T ", &timeinfo);
-        } else {
-            strftime(time_str, sizeof(time_str), "%a %T ", &timeinfo);
-        }
-        printf("%s", time_str);
-        switch (iter->type) {
-            case ME:
-                printf("%s", COLOR_CYAN);
-                printf("Me: %s", iter->msg);
-                break;
-            case THEM:
-                printf("%s", COLOR_YELLOW);
-                printf("%s: %s", other_name, iter->msg);
-                break;
-            case STATUS:
-                printf("%s", COLOR_NONE);
-                printf("%s", iter->msg);
-                break;
-        }
-        printf("%s", COLOR_NONE);
-        printf("\n");
-        iter = iter->next;
-        fflush(stdout);
-    }
-
-    //restore cursor
-    printf( "%s", RESTORE_CURSOR);
-    fflush(stdout);
-}
-
-int redact_last_msg(enum msg_type type) {
-    struct node *iter;
-    int found =  0;
-
-    if (!tail) {
-        return found;
-    }
-
-    iter = tail;
-    while (iter) {
-        if (iter->type == type) {
-            delete_node(iter);
-            iter = NULL;
-            found = 1;
-        } else {
-            iter = iter->prev;
-        }
-    }
-
-    if (found) {
-        update_display();
-    }
-
-    return found;
+    strncpy(dst->msg.msg, src->msg, MSG_SIZE);
+    strncpy(dst->msg.nick, src->nick, NICK_SIZE);
+    dst->msg.user_id = src->user_id;
+    dst->msg.time = src->time;
+    dst->msg.type = src->type;
 }
 
 
-void clear_history()
-{
-    struct node *iter;
-    struct node *next;
-
-    if (!root) {
-        return;
-    }
-
-    iter = root;
-
-    while (iter) {
-        next = iter->next;
-        memset(iter->msg, 0, strlen(iter->msg));
-        free(iter->msg);
-        memset(iter, 0, sizeof(struct node));
-        free(iter);
-        iter = next;
-    }
-    root = NULL;
-    tail = NULL;
-
-    rl_clear_history();
-}
-
-void clear_display()
-{
-    printf("%s", RESET_TERM);
-    printf("%s", CLEAR_SCROLLBACK);
-    printf("%s", CLEAR_SCREEN);
-    // get window size
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-
-    // set scrollable region
-    printf("\033[(1;%ur", w.ws_row - 1);
-
-    // position cursor
-    printf("\033[%u;1f", w.ws_row);
-}
-
-void remove_mark_message()
-{
-    struct node *iter;
-
-    iter = root;
-
-    while (iter) {
-        if (iter->type == STATUS && (strcmp(iter->msg, MSG_MARK) == 0)) {
-            delete_node(iter);
-            iter = NULL;
-        } else {
-            iter = iter->next;
-        }
-    }
-}
-
-void remove_history_cleared_messages()
-{
-    struct node *iter;
-
-    iter = root;
-
-    while (iter) {
-        if (iter->type == STATUS &&
-                (strcmp(iter->msg, MSG_HISTORY_CLEARED) == 0)) {
-            struct node *next = iter->next;
-            delete_node(iter);
-            iter = next;
-        } else {
-            iter = iter->next;
-        }
-    }
-}
-
-void add_new_message(char *msg, enum msg_type type)
+void add_new_message(struct msg *msg)
 {
     struct node *new = NULL;
     struct node *iter;
@@ -421,19 +157,13 @@ void add_new_message(char *msg, enum msg_type type)
 
     if (root == NULL) {
         root = malloc(sizeof(struct node));
-        root->msg = malloc(strlen(msg) + 1);
-        strncpy(root->msg, msg, strlen(msg) +  1);
-        root->time = time(NULL);
-        root->type = type;
+        copy_msg(root, msg);
         root->next = NULL;
         root->prev = NULL;
         tail = root;
     } else {
         new = malloc(sizeof(struct node));
-        new->msg = malloc(strlen(msg) + 1);
-        strncpy(new->msg, msg, strlen(msg) + 1);
-        new->time = time(NULL);
-        new->type = type;
+        copy_msg(new, msg);
         new->next = NULL;
         // update tail
         tail->next = new;
@@ -442,7 +172,7 @@ void add_new_message(char *msg, enum msg_type type)
     }
 
     // trim history for transient mode
-    if (transient_mode) {
+    if (g_client_state.transient_mode) {
         i = 0;
 
         iter = tail;
@@ -459,421 +189,659 @@ void add_new_message(char *msg, enum msg_type type)
     }
 }
 
-void *reader(void *arg)
+void update_display(void)
 {
-    FILE* fp;
-    int msg_len, total_len = 0;
-    char msg[BUFSIZE];
-    char *msg_assembled = NULL;
-    int line_complete;
+    int count = 0, i;
+    struct node *iter;
+    struct tm timeinfo;
+    struct tm now;
+    time_t now_time;
+    char time_str[BUF_SIZE];
+    char *newline;
 
-    if (is_a) {
-        fp = fopen(b_filename, "r");
-    } else {
-        fp = fopen(a_filename, "r");
-        fscanf(fp, "%u\n", &transient_mode);
+    // save cursor
+    printf("%s", SAVE_CURSOR);
+
+    // first, count # of messages to print
+    iter = root;
+    while (iter != NULL && count < MAX_DISPLAY_MESSAGES) {
+        iter = iter->next;
+        count++;
     }
 
-    while (1) {
-        if (NULL == fgets(msg, sizeof(msg), fp)) {
-            fclose(fp);
-            pthread_exit(0);
+    // clear screen (skipping input bar)
+    for (i = w.ws_row; i != 0; i--) {
+        printf("%s", LINE_UP);
+        printf("%s", CLEAR_LINE);
+    }
+
+    printf("%s", RESTORE_CURSOR);
+    fflush(stdout);
+
+    if (g_client_state.clear_mode) {
+        return;
+    }
+
+    // navigate backwards to the beginning of what we want to print
+    iter = tail;
+    for (; count != 0; count--) {
+        printf("%s", LINE_UP);
+        if (iter->prev != NULL) {
+            iter = iter->prev;
         }
+    }
 
-        msg_len =  strlen (msg);
-
-        if (msg[msg_len - 1] != '\n') {
-            line_complete = 0;
+    // print messages!
+    while (iter != NULL) {
+        localtime_r(&iter->msg.time, &timeinfo);
+        now_time = time(NULL);
+        localtime_r(&now_time, &now);
+        if (now.tm_year == timeinfo.tm_year &&
+                now.tm_mon == timeinfo.tm_mon &&
+                now.tm_mday == timeinfo.tm_mday) {
+            strftime(time_str, sizeof(time_str), "%T ", &timeinfo);
         } else {
-            line_complete = 1;
+            strftime(time_str, sizeof(time_str), "%a %T ", &timeinfo);
         }
 
-        total_len += msg_len;
-        msg_assembled = realloc(msg_assembled, total_len + 1);
-        if (total_len == msg_len) {
-            memset(msg_assembled, 0, total_len + 1);
-        }
-        strncat(msg_assembled, msg, total_len +  1);
+        printf("%s", time_str);
 
-        // we can receive remote commands
-        if (line_complete) {
-            // strip newline
-            msg_assembled[total_len - 1] = '\0';
-            if (strncmp(CLEAR_CMD, msg_assembled, CMD_SIZE) == 0) {
-                pthread_mutex_lock(&msg_mutex);
-                them_clear = ~them_clear;
-                update_prompt();
-                pthread_mutex_unlock(&msg_mutex);
-            } else if (strncmp(CLEAR_HISTORY_CMD, msg_assembled, CMD_SIZE) ==  0) {
-                pthread_mutex_lock(&msg_mutex);
-                add_new_message(MSG_HISTORY_CLEARED, STATUS);
-                if (clear && pending_msg > 0) {
-                    pending_msg = 0;
-                    update_prompt();
-                }
-                update_display();
-                if (current_urgent_mode != URGENT_NONE) {
-                    printf("%s", VISIBLE_BEEP);
-                    fflush(stdout);
-                }
-                pthread_mutex_unlock(&msg_mutex);
-            } else if (strncmp(REDACT_CMD, msg_assembled, CMD_SIZE) == 0) {
-                pthread_mutex_lock(&msg_mutex);
-                if (clear && pending_msg > 0) {
-                    pending_msg--;
-                    update_prompt();
-                }
-                redact_last_msg(THEM);
-                pthread_mutex_unlock(&msg_mutex);
-            } else if (strncmp (TYPING_START_CMD, msg_assembled, CMD_SIZE) == 0) {
-                    pthread_mutex_lock(&msg_mutex);
-                    them_typing = 1;
-                    update_prompt();
-                    printf(CHANGE_TITLE_IS_TYPING_FORMAT, window_title);
-                    if (current_urgent_mode == URGENT_ALL) {
-                        printf("%s", VISIBLE_BEEP);
-                    }
-                    fflush(stdout);
-                    pthread_mutex_unlock(&msg_mutex);
-            } else if (strncmp(TYPING_END_CMD, msg_assembled, CMD_SIZE) == 0) {
-                pthread_mutex_lock(&msg_mutex);
-                them_typing = 0;
-                update_prompt();
-                printf(CHANGE_TITLE_FORMAT, window_title);
-                fflush(stdout);
-                pthread_mutex_unlock(&msg_mutex);
-            } else if (strncmp(TYPING_STALLED_CMD, msg_assembled, CMD_SIZE) == 0) {
-                pthread_mutex_lock(&msg_mutex);
-                them_typing = 2;
-                update_prompt();
-                printf(CHANGE_TITLE_FORMAT, window_title);
-                fflush(stdout);
-                pthread_mutex_unlock(&msg_mutex);
-            } else if (strncmp (QUIT_CMD, msg_assembled, CMD_SIZE) == 0) {
-                fclose(fp);
-                pthread_mutex_lock(&msg_mutex);
-                clear_history();
-                pthread_mutex_unlock(&msg_mutex);
-                clear_display();
-                printf("%s", RESET_TERM);
-                printf("other side closed connection\n");
-                // signal writer to quit
-                pthread_kill(pt_writer, SIGUSR1);
-                pthread_exit(0);
+        switch (iter->msg.type) {
+        case MSG_NORMAL:
+            if (iter->msg.user_id == g_client_state.user_id) {
+                printf("%s", COLOR_CYAN);
             } else {
-                pthread_mutex_lock(&msg_mutex);
-                add_new_message(msg_assembled, THEM);
-                if (clear) {
-                    pending_msg++;
-                    update_prompt();
+                printf("%s", COLOR_YELLOW);
+            }
+            break;
+        default:
+            printf("%s", COLOR_NONE);
+            break;
+
+        }
+
+        if (iter->msg.type == MSG_NORMAL) {
+            printf("%s: %s", iter->msg.nick, iter->msg.msg);
+        } else if (iter->msg.msg[0]) {
+            printf("%s", iter->msg.msg);
+        }
+
+        printf("%s\n", COLOR_NONE) ;
+
+        iter = iter->next;
+    }
+
+    //restore cursor
+    printf("%s", RESTORE_CURSOR);
+    fflush(stdout);
+}
+
+int redact_message(int user_id)
+{
+    struct node *iter;
+    int found =  0;
+
+    if (!tail) {
+        return found;
+    }
+
+    iter = tail;
+    while (iter) {
+        if (iter->msg.user_id == user_id && iter->msg.type == MSG_NORMAL) {
+            delete_node(iter);
+            iter = NULL;
+            found = 1;
+        } else {
+            iter = iter->prev;
+        }
+    }
+
+    if (found) {
+        update_display();
+    }
+
+    return found;
+}
+
+void window_resized(int signum)
+{
+    pthread_mutex_lock(&msg_mutex);
+    clear_display();
+    update_display();
+    rl_redisplay();
+    pthread_mutex_unlock(&msg_mutex);
+}
+
+void process_message(struct msg *msg)
+{
+    switch(msg->type) {
+    case MSG_NORMAL:
+    case MSG_JOIN:
+    case MSG_CLEAR_HISTORY:
+    case MSG_QUIT:
+        add_new_message(msg);
+        if (g_client_state.clear_mode && msg->user_id != g_client_state.user_id) {
+            g_client_state.num_pending_msg++;
+            update_prompt();
+            rl_redisplay();
+        }
+        break;
+    case MSG_REDACT:
+        if (redact_message(msg->user_id)) {
+            if (g_client_state.num_pending_msg > 0 && msg->user_id != g_client_state.user_id) {
+                g_client_state.num_pending_msg--;
+                update_prompt();
+                rl_redisplay();
+            }
+        }
+    default:
+        /* ??? */
+        break;
+    }
+}
+
+void * server_thread(void *arg)
+{
+    int fd, client_fd;
+    struct sockaddr_un client_sock;
+    struct sockaddr_un *sock = (struct sockaddr_un *)arg;
+    socklen_t client_sock_len;
+    struct pollfd fds[MAX_USERS+1];
+    int num_fds;
+    int flags;
+    struct nick_entry {
+        int fd;
+        char nick[NICK_SIZE];
+    };
+    char nicks[MAX_USERS+1][NICK_SIZE];
+
+    memset(fds, 0, sizeof(fds));
+    memset(nicks, 0, sizeof(nicks));
+
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    if (bind(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(fd, 10) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    num_fds = 1;
+    fds[0].fd = fd;
+    fds[0].events = POLLIN;
+
+    while (1) {
+        //printf("poll returned %d\n", poll(fds, num_fds, -1));
+        poll(fds, num_fds, -1);
+        /* check new connection fd */
+        if (fds[0].revents & POLLIN) {
+            client_fd = accept(fd, (struct sockaddr *)&client_sock, &client_sock_len);
+
+            /* non blocking socket */
+            flags = fcntl(client_fd, F_GETFL, 0);
+            fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
+            /* put client_fd into empty fds slot */
+            fds[num_fds].fd = client_fd;
+            fds[num_fds].events = POLLIN;
+            fds[num_fds].revents = 0;
+
+            /* put client_fd into empty nick slot + init nick */
+            memset(nicks[num_fds], 0, NICK_SIZE);
+
+            num_fds++;
+        }
+        if ((fds[0].revents & ~POLLIN) > 0) {
+            printf("server fd has an event other than POLLIN: %x\n", fds[0].revents);
+        }
+        int remove = 0;
+        /* figure out which fds have events */
+        for (int i = 1; i < num_fds; i++) {
+            remove = 0;
+            /* there is data available on this fd */
+            if (fds[i].revents & POLLIN) {
+                /* read this msg */
+                struct msg msg = {0};
+                /* read a message */
+                int total_read = read_msg(fds[i].fd, &msg);
+
+                if (total_read == sizeof(struct msg)) {
+                    switch(msg.type) {
+                    case MSG_JOIN:
+                        if (nicks[i][0] == '\0') { /* if we don't have a nick for this user yet */
+                            /* make sure the nick isn't taken already */
+                            for (int j = 1; j < num_fds; j++) {
+                                if (strcmp(nicks[j], msg.nick) == 0) {
+                                    /* nick taken; reject this join */
+                                    msg.type = MSG_JOIN_REJECTED;
+                                    write_msg(fds[i].fd, &msg);
+                                    total_read = 0;
+                                    break;
+                                }
+                            }
+                            /* did we survive the duplicate nick check? */
+                            if (msg.type == MSG_JOIN) {
+                                snprintf(nicks[i], NICK_SIZE, "%s", msg.nick);
+                                /* ensure null-terminated */
+                                snprintf(msg.msg, sizeof(msg.msg), "%s joined the chat!", nicks[i]);
+                            }
+                        } else {
+                            /* ignore rejoin */
+                            total_read = 0;
+                        }
+                        break;
+                    case MSG_CLEAR_HISTORY:
+                        if (nicks[i][0] != '\0') {
+                            snprintf(msg.msg, sizeof(msg.msg), "%s cleared history!", nicks[i]);
+                        } else {
+                            /* received clear history from someone who hasn't given a nick yet */
+                            total_read = 0;
+                        }
+                        break;
+                    case MSG_QUIT:
+                        if (nicks[i][0] != '\0') {
+                            snprintf(msg.msg, sizeof(msg.msg), "%s left the chat!", nicks[i]);
+                        } else {
+                            /* received quit from someone who hasn't given a nick yet */
+                            total_read = 0;
+                        }
+                        remove = 1;
+                        break;
+                    case MSG_REDACT:
+                    case MSG_NORMAL:
+                        break;
+                    default:
+                        printf("received unknown command: %d, ignoring\n", msg.type);
+                        /* make sure we don't write anything to other clients */
+                        total_read = 0;
+                        break;
+                    }
+
+                    strncpy(msg.nick, nicks[i], NICK_SIZE-1);
+                    msg.user_id = fds[i].fd;
+
+                    /* propogate this message to all other sockets */
+                    /* we want to write this message back to the socket it came from, too */
+                    if (total_read == sizeof(struct msg)) {
+                        for (int j = 1; j < num_fds; j++) {
+                            /* write ALL THE DATA */
+                            if (nicks[j][0] != '\0') {
+                                write_msg(fds[j].fd, &msg);
+                            }
+                        }
+                    }
                 }
-                update_display();
-                if (current_urgent_mode != URGENT_NONE) {
-                    printf("%s", VISIBLE_BEEP);
-                    fflush(stdout);
-                }
-                pthread_mutex_unlock(&msg_mutex);
             }
 
-            free(msg_assembled);
-            msg_assembled = NULL;
-            total_len = 0;
+            if (fds[i].revents & POLLHUP) {
+                remove = 1;
+            }
+            if (fds[i].revents & POLLERR || fds[i].revents & POLLNVAL) {
+                remove = 1;
+            }
+            if (remove) {
+                close(fds[i].fd);
+
+                /* consolidate lists */
+                fds[i].fd = fds[num_fds-1].fd;
+                fds[i].events = POLLIN;
+
+                memcpy(nicks[i], nicks[num_fds-1], NICK_SIZE);
+
+                memset(nicks[num_fds-1], 0, NICK_SIZE);
+
+                num_fds--;
+            }
+        }
+    }
+
+    pthread_exit(EXIT_SUCCESS);
+}
+
+void remove_mark_message()
+{
+    struct node *iter;
+
+    iter = root;
+
+    while (iter) {
+        if (iter->msg.type == MSG_MARK) {
+            delete_node(iter);
+            iter = NULL;
+        } else {
+            iter = iter->next;
         }
     }
 }
 
-void *writer(void *arg)
+void * user_input_thread(void *arg)
 {
-    char *msg =  NULL;
-    char prompt[BUFSIZE];
+    int fd = *(int *)arg;
+    struct msg msg = {0};
+    char *rl_str = NULL;
 
-    if (is_a) {
-        writer_fp = fopen(a_filename , "w");
-        fprintf(writer_fp, "%u\n", transient_mode);
-        fflush(writer_fp);
-    } else {
-        writer_fp = fopen(b_filename, "w");
+    while (1) {
+        g_client_state.join_state = JOIN_PENDING;
+
+        /* first, prompt for nick */
+        rl_str = readline("enter nick: ");
+
+        if (rl_str == NULL) {
+            g_client_state.should_exit = 1;
+            pthread_exit(EXIT_SUCCESS);
+        }
+
+        if (rl_str[0] == '\0') {
+            continue;
+        }
+
+        strncpy(msg.nick, rl_str, NICK_SIZE-1);
+        free(rl_str);
+        msg.type = MSG_JOIN;
+        msg.time = time(NULL);
+        write_msg(fd, &msg);
+
+        while (g_client_state.join_state == JOIN_PENDING) {
+            sleep(0.5f);
+        }
+
+        if (g_client_state.join_state == JOINED) {
+            break;
+        }
+
+        printf("%s", SAVE_CURSOR);
+        printf("%s", LINE_UP);
+        printf("%s", CLEAR_LINE);
+        printf("nick taken! try again\n");
+        printf("%s", RESTORE_CURSOR);
+        printf("%s", CLEAR_LINE);
     }
 
     using_history();
-    rl_event_hook = check_typing;
+    pthread_mutex_lock(&msg_mutex);
+    clear_display();
+    update_display();
+    pthread_mutex_unlock(&msg_mutex);
 
-    while (1) {
-        if (msg) {
-            free(msg);
-            msg = NULL;
-        }
-
-        printf("%s", CLEAR_LINE);
-        fflush(stdout);
-        get_prompt(prompt);
-        if (NULL == (msg = readline(prompt))) {
-            // tell the other side to quit (if we can)
-            pthread_mutex_lock(&msg_mutex);
-            clear_history();
-            fprintf(writer_fp , QUIT_CMD);
-            fprintf(writer_fp, "\n");
-            fclose(writer_fp);
-            pthread_mutex_unlock(&msg_mutex);
-            pthread_exit(0);
-        }
-
-        if (*msg == '\0') {
-            // do nothing
-            pthread_mutex_lock(&msg_mutex);
-            update_display();
-            pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(CHANGE_PROMPT_CMD, msg, CMD_SIZE) == 0) {
-            // prompt for new name
-            if (msg)
-                free(msg);
-            msg = readline("new prompt: ");
-            snprintf(custom_prompt, sizeof(custom_prompt), "%s", msg);
+    /* main msg processing loop */
+    while (!g_client_state.should_exit && (rl_str = readline(g_client_state.prompt)) != NULL) {
+        memset(&msg, 0, sizeof(struct msg));
+        switch (strlen(rl_str)) {
+        /* user pressed enter with no text entered; do a full screen refresh */
+        case 0:
             pthread_mutex_lock(&msg_mutex);
             clear_display();
             update_display();
             pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(CHANGE_TITLE_CMD, msg, CMD_SIZE) == 0) {
-            // prompt for new title
-            if (msg)
-                free(msg);
-            msg = readline("new window title: ");
-            snprintf(window_title, sizeof(window_title), "%s", msg);
-            printf(CHANGE_TITLE_FORMAT, window_title);
-            fflush(stdout);
-        } else if (strncmp(CYCLE_URGENT_MODE_CMD, msg, CMD_SIZE) == 0) {
-            cycle_urgent_mode();
-            printf("%s", SAVE_CURSOR);
-            printf("%s", LINE_UP);
-            printf("current urgent mode: ");
-            switch (current_urgent_mode) {
-                case URGENT_ALL:
-                    printf("all\n");
-                    break;
-                case URGENT_MSG_ONLY:
-                    printf("new msgs only\n");
-                    break;
-                case URGENT_NONE:
-                    printf("none\n");
-                    break;
-            }
-            printf("%s", RESTORE_CURSOR);
-            fflush(stdout);
-        } else if (strncmp(CHANGE_OTHER_NAME_CMD, msg, CMD_SIZE) == 0) {
-            // prompt for new name
-            if (msg)
-                free(msg);
-            msg = readline("new other name: ");
-            snprintf(other_name, sizeof(other_name), "%s", msg);
-            pthread_mutex_lock(&msg_mutex);
-            clear_display();
-            update_display();
-            pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(HELP_CMD, msg, CMD_SIZE) == 0) {
-            printf("%s", SAVE_CURSOR);
-            printf("%s", LINE_UP);
-            printf("q: quit\nc: toggle clear mode\nu: cycle urgent mode\nm: "
-                    "mark current line\nt: change window title\nn: change "
-                    "other name\np: change prompt string\nr: redraw "
-                    "terminal\nC: clear history\n-: redact last message\n");
-            printf("%s", RESTORE_CURSOR);
-            fflush(stdout);
-        } else if (strncmp(REDACT_CMD, msg, CMD_SIZE) == 0) {
-            pthread_mutex_lock(&msg_mutex);
-            // only send redact command if we have a message to redact
-            if (redact_last_msg(ME)) {
-                fprintf(writer_fp, "%s\n", msg);
-                fflush(writer_fp);
-            }
-            pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(CLEAR_HISTORY_CMD, msg, CMD_SIZE) == 0) {
-            pthread_mutex_lock(&msg_mutex);
-            clear_history();
-            clear_display();
-            update_display();
-            fprintf(writer_fp, "%s\n", msg);
-            fflush(writer_fp);
-            pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(RESET_CMD, msg, CMD_SIZE) == 0) {
-            pthread_mutex_lock(&msg_mutex);
-            clear_display();
-            update_display();
-            pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(QUIT_CMD, msg, CMD_SIZE) == 0) {
-            pthread_mutex_lock(&msg_mutex);
-            clear_history();
-            pthread_mutex_unlock(&msg_mutex);
-            fprintf(writer_fp, "%s\n", msg);
-            fclose(writer_fp);
-            pthread_exit(0);
-        } else if (strncmp(CLEAR_CMD, msg, CMD_SIZE) == 0) {
-            pthread_mutex_lock(&msg_mutex);
-            clear = ~clear;
-            if (!clear) {
-                if (pending_msg == 0) {
-                    remove_mark_message();
-                }
-                pending_msg = 0;
-            } else {
-                remove_mark_message();
-                add_new_message(MSG_MARK, STATUS);
-            }
-            clear_display();
-            update_display();
-            // send this command to let the other side know we're in clear mode
-            fprintf(writer_fp, "%s\n", msg);
-            fflush(writer_fp);
-            pthread_mutex_unlock(&msg_mutex);
-        } else if (strncmp(MARK_CMD, msg, CMD_SIZE) == 0) {
-            if (!clear) {
+            continue;
+        /* single letter command */
+        case 1:
+            switch (rl_str[0]) {
+            case UI_QUIT_CMD:
+                g_client_state.should_exit = 1;
+                printf("%s", CLEAR_LINE);
+                continue;
+            case UI_CLEAR_HISTORY_CMD:
                 pthread_mutex_lock(&msg_mutex);
-                remove_mark_message();
-                add_new_message(MSG_MARK, STATUS);
+                clear_history();
+                g_client_state.num_pending_msg = 0;
+                clear_display();
+                update_display();
+                update_prompt();
+                pthread_mutex_unlock(&msg_mutex);
+                msg.type = MSG_CLEAR_HISTORY;
+                msg.time = time(NULL);
+                write_msg(fd, &msg);
+                continue;
+            case UI_CLEAR_CMD:
+                pthread_mutex_lock(&msg_mutex);
+                g_client_state.clear_mode = ~g_client_state.clear_mode;
+                if (!g_client_state.clear_mode) {
+                    g_client_state.num_pending_msg = 0;
+                } else {
+                    msg.type = MSG_MARK;
+                    msg.time = time(NULL);
+                    strncpy(msg.msg, MSG_MARK_STR, MSG_SIZE-1);
+                    remove_mark_message();
+                    add_new_message(&msg);
+                }
+                clear_display();
+                update_prompt();
                 update_display();
                 pthread_mutex_unlock(&msg_mutex);
-            }
-        } else {
-            pthread_mutex_lock(&msg_mutex);
-            if (!clear) {
-                // remove the clear message if we 're not in clear mode
+                continue;
+            case UI_REDACT_CMD:
+                pthread_mutex_lock(&msg_mutex);
+                printf("%s", CLEAR_LINE);
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
+                msg.type = MSG_REDACT;
+                msg.time = time(NULL);
+                write_msg(fd, &msg);
+                continue;
+            case UI_MARK_CMD:
+                msg.type = MSG_MARK;
+                msg.time = time(NULL);
+                strncpy(msg.msg, MSG_MARK_STR, MSG_SIZE-1);
+                pthread_mutex_lock(&msg_mutex);
+                printf("%s", CLEAR_LINE);
                 remove_mark_message();
-                remove_history_cleared_messages();
+                add_new_message(&msg);
+                update_display();
+                pthread_mutex_unlock(&msg_mutex);
+                continue;
+            default:
+                break;
             }
-            add_new_message(msg, ME);
-            add_history(msg);
-            fprintf(writer_fp, "%s\n", msg);
-            fflush(writer_fp);
-            update_display();
-            pthread_mutex_unlock(&msg_mutex);
+        default:
+            break;
+
         }
+
+        /* forward message to server */
+        pthread_mutex_lock(&msg_mutex);
+        printf("%s", CLEAR_LINE);
+        if (!g_client_state.clear_mode) {
+            remove_mark_message();
+        }
+        update_display();
+        pthread_mutex_unlock(&msg_mutex);
+        strncpy(msg.msg, rl_str, MSG_SIZE-1);
+        msg.time = time(NULL);
+        msg.type = MSG_NORMAL;
+        write_msg(fd, &msg);
+        add_history(rl_str);
+        free(rl_str);
     }
+
+    /* send quit message to server before exiting */
+    memset(&msg, 0, sizeof(struct msg));
+    msg.time = time(NULL);
+    msg.type = MSG_QUIT;
+    write_msg(fd, &msg);
+    rl_clear_history();
+    g_client_state.should_exit = 1;
+    pthread_cond_signal(&exit_wait_cond);
+    pthread_exit(EXIT_SUCCESS);
 }
 
-int main(int argc, char *argv[])
+void * server_processing_thread(void *arg)
 {
-    struct stat fstat;
-    void *res;
+    int fd = *(int *)arg;
+
+    struct msg msg = {0};
+
+    while (!g_client_state.should_exit) {
+        if (read_msg(fd, &msg) != sizeof(struct msg)) {
+            break;
+        }
+
+        if (g_client_state.join_state == JOIN_PENDING) {
+            switch (msg.type) {
+            case MSG_JOIN:
+                g_client_state.join_state = JOINED;
+                /* since this is the first message we will receive, this message *must* contain our user_id */
+                g_client_state.user_id = msg.user_id;
+                break;
+            case MSG_JOIN_REJECTED:
+                g_client_state.join_state = JOIN_REJECTED;
+                continue;
+                break;
+            default:
+                break;
+
+            }
+        }
+
+        pthread_mutex_lock(&msg_mutex);
+        process_message(&msg);
+        update_display();
+        if (g_client_state.urgent_mode != URGENT_NONE) {
+            printf("%s", VISIBLE_BEEP);
+            fflush(stdout);
+        }
+        pthread_mutex_unlock(&msg_mutex);
+    }
+
+    g_client_state.should_exit = 1;
+    pthread_cond_signal(&exit_wait_cond);
+    pthread_exit(EXIT_SUCCESS);
+}
+
+void client(const struct sockaddr_un *sock)
+{
     struct sigaction new_action;
-    char *response;
+    void *res;
+    int fd, counter = 0;
 
-    FILE *startupfp;
-    FILE *lockfp;
-
-    if    (argc != 1)  {
-        printf("usage : %s\n", argv[0]);
-        return 1;
-    }
-
-    response = readline("<enter> for new session, key for existing: ");
-    if (response == NULL) {
-        printf("goodbye!\n");
-        return 1;
-    } else if (response [0] == '\0') {
-        snprintf(dirname, BUFSIZE, "/tmp/comms.XXXXXX");
-        if (NULL == mkdtemp(dirname)) {
-            printf("error in mkdtemp()\n");
-            return 1;
-        }
-    } else {
-        if (strlen(response) != 6) {
-            printf("invalid key, goodbye!\n");
-            return 1;
-        } else {
-          snprintf(dirname, BUFSIZE, "/tmp/comms.%s", response);
-        }
-    }
-
-    snprintf(custom_prompt, sizeof(custom_prompt), "%s", &dirname[11]);
-    snprintf(log_filename, sizeof(log_filename), "/tmp/%s.txt", custom_prompt);
-    snprintf(a_filename, sizeof(a_filename), "%s/a", dirname);
-    snprintf(b_filename, sizeof(b_filename), "%s/b", dirname);
-    snprintf(lock_filename, sizeof(lock_filename), "%s/lock", dirname );
-
-    // check lock file to make sure there isn't an existing session
-    if (0 == stat(lock_filename, &fstat)) {
-        printf("invalid key, goodbye!\n");
-        return 1;
-    }
-
-    // meetup
-    if (-1 == stat(a_filename, &fstat)) {
-        if (errno == ENOENT) {
-            // we're first, create the fifos
-            umask(0);
-            if (-1 == mkfifo(a_filename , 0600) ||
-                    -1 == mkfifo(b_filename, 0600)) {
-                printf("invalid key, goodbye!\n");
-                return 1;
-            }
-
-            is_a = 1;
-
-            response = readline("transient mode? (y/N): ");
-
-            if (response != NULL && strcmp(response, "y") == 0) {
-                transient_mode = 1;
-            }
-
-            printf("key: %s\nwaiting for connection...\n", custom_prompt);
-            startupfp = fopen(a_filename, "r");
-
-            if (startupfp) {
-                fflush(NULL);
-                fscanf(startupfp, "%*d\n");
-                fclose(startupfp);
-            } else {
-                printf("error opening startup file for reading\n");
-                return 1;
-            }
-        } else {
-            printf("error stat'ing startup file\n");
-            return 1;
-        }
-    } else {
-        // we're second; write to the fifo to signal our arrival
-        startupfp = fopen(a_filename, "w");
-        if (startupfp) {
-            fprintf(startupfp, "1\n");
-            fclose(startupfp);
-        } else {
-            printf("error opening startup file for writing\n");
-            return 1;
-        }
-    }
-
-    // made it, lock!
-    lockfp = fopen(lock_filename, "w");
-    if (lockfp == NULL) {
-        printf("error acquiring lock!\n");
-        cleanup();
-        exit(1);
-    }
-
-    fclose(lockfp);
-
-    // clear our session name
-    snprintf(window_title, sizeof(window_title), "%s", custom_prompt);
-    printf(CHANGE_TITLE_FORMAT, window_title);
-    memset(custom_prompt, 0, sizeof(custom_prompt));
-    clear_display();
-    printf("%s", VISIBLE_BEEP);
-    fflush(stdout);
-
-    snprintf(other_name, sizeof(other_name), "Them");
-
+    /* TODO need to ensure this runs *after* server starts */
     sigemptyset(&new_action.sa_mask);
     new_action.sa_flags = 0;
     new_action.sa_handler = window_resized;
     sigaction(SIGWINCH, &new_action, NULL);
 
-    // startup threads
-    pthread_create(&pt_reader, NULL, &reader, NULL);
-    pthread_create(&pt_writer, NULL, &writer, NULL);
+    new_action.sa_handler = ignore_signal;
+    sigaction(SIGUSR1, &new_action, NULL);
+    sigaction(SIGINT, &new_action, NULL);
 
-    pthread_join(pt_writer, &res);
-    free(res);
+    /* connect to socket to get fd */
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
 
-    cleanup();
-    printf("bye!\n");
+    printf("waiting to connect...\n");
+
+    while (connect(fd, (struct sockaddr *)sock, sizeof(struct sockaddr_un)) < 0 && counter < MAX_CONNECT_RETRIES) {
+        sleep(0.1f);
+        counter++;
+    }
+
+    if (counter >= MAX_CONNECT_RETRIES) {
+        perror("failed to connect");
+        exit(EXIT_FAILURE);
+    }
+
+    /* init state */
+    clear_display();
+    g_client_state.urgent_mode = URGENT_ALL;
+    g_client_state.num_pending_msg = 0;
+
+    /* need to create threads for user input + server processing */
+    pthread_create(&pt_user_input, NULL, &user_input_thread, (void*)&fd);
+    pthread_create(&pt_server_processing, NULL, &server_processing_thread, (void*)&fd);
+
+    pthread_mutex_lock(&exit_wait_mutex);
+    while (!g_client_state.should_exit) {
+        pthread_cond_wait(&exit_wait_cond, &exit_wait_mutex);
+    }
+    pthread_mutex_unlock(&exit_wait_mutex);
+
+    // one of our threads signaled exit; signal our other thread(s) to exit
+    pthread_kill(pt_server_processing, SIGUSR1);
+    pthread_kill(pt_user_input, SIGUSR1);
+
+    return;
+}
+
+int main(int argc, char **argv)
+{
+    int is_server = 0;
+    void *res;
+    char comms_dir_template[] = COMMS_DIR_TEMPLATE;
+    char sockpath[sizeof(COMMS_DIR_TEMPLATE) + sizeof(JCHAT_SOCK_FILENAME)] = {0};
+
+    char *response = NULL;
+
+    struct sockaddr_un sock = {
+        .sun_family = AF_UNIX
+    };
+
+    if (argc != 1) {
+        printf("usage: %s\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    response = readline("<enter> for new session, key for existing: ");
+    if (response == NULL) {
+        printf("goodbye!\n");
+        return 0;
+    } else if (response[0] == '\0') {
+        is_server = 1;
+        if (NULL == mkdtemp(comms_dir_template)) {
+            perror("mkdtemp");
+            exit(EXIT_FAILURE);
+        }
+        snprintf(sockpath, sizeof(sockpath), "%s", comms_dir_template);
+        snprintf(g_client_state.key, KEY_SIZE, "%s", &comms_dir_template[11]);
+    } else {
+        if (strlen(response) != 6) {
+            printf("invalid key, goodbye!\n");
+            exit(EXIT_FAILURE);
+        } else {
+            snprintf(sockpath, sizeof(sockpath), "/tmp/comms.%s", response);
+            snprintf(g_client_state.key, KEY_SIZE, "%s", response);
+        }
+    }
+
+    update_prompt();
+
+    if (response) {
+        free(response);
+    }
+
+    strcat(sockpath, JCHAT_SOCK_FILENAME);
+
+    snprintf(sock.sun_path, sizeof(sock.sun_path), "%s", sockpath);
+
+    if (is_server) {
+        pthread_create(&pt_server, NULL, &server_thread, &sock);
+    }
+
+    client(&sock);
+
+    // reset terminal
+    printf("%s", RESET_TERM);
+    printf("%s", CLEAR_SCROLLBACK);
+    printf("%s", CLEAR_SCREEN);
+
+    fflush(stdout);
+
+    if (is_server) {
+        printf("server is still running... [enter] to stop\n");
+        readline(NULL);
+        unlink(sockpath);
+        rmdir(comms_dir_template);
+    }
+
     return 0;
 }

@@ -1,12 +1,9 @@
-BINS=jchat newchat
+BINS=jchat
 
 all: ${BINS}
 
-jchat: jchat.c
-	gcc -o $@ $< -lpthread -lreadline
-
-newchat: newchat.c newchat.h
-	gcc -o $@ newchat.c -lpthread -lreadline
+jchat: jchat.c jchat.h
+	gcc -o $@ jchat.c -lpthread -lreadline
 
 clean:
 	rm -f ${BINS}
