@@ -51,20 +51,20 @@ void update_prompt(void)
 
 void write_msg(int fd, struct msg *msg)
 {
-    int total_written = 0, bytes_written;
+    unsigned int total_written = 0, bytes_written;
     while (total_written < sizeof(struct msg)) {
         bytes_written = write(fd, ((char *)msg) + total_written, sizeof(struct msg) - total_written);
         if (bytes_written > 0) {
             total_written += bytes_written;
         } else {
-            break;
+            return;
         }
     }
 }
 
 int read_msg(int fd, struct msg *msg)
 {
-    int total_read = 0, bytes_read;
+    unsigned int total_read = 0, bytes_read;
     while (total_read < sizeof(struct msg)) {
         bytes_read = read(fd, ((char *)msg) + total_read, sizeof(struct msg) - total_read);
         if (bytes_read > 0) {
@@ -197,7 +197,6 @@ void update_display(void)
     struct tm now;
     time_t now_time;
     char time_str[BUF_SIZE];
-    char *newline;
 
     // save cursor
     printf("%s", SAVE_CURSOR);
@@ -719,7 +718,6 @@ void * server_processing_thread(void *arg)
 void client(const struct sockaddr_un *sock)
 {
     struct sigaction new_action;
-    void *res;
     int fd, counter = 0;
 
     /* TODO need to ensure this runs *after* server starts */
@@ -776,7 +774,6 @@ void client(const struct sockaddr_un *sock)
 int main(int argc, char **argv)
 {
     int is_server = 0;
-    void *res;
     char comms_dir_template[] = COMMS_DIR_TEMPLATE;
     char sockpath[sizeof(COMMS_DIR_TEMPLATE) + sizeof(JCHAT_SOCK_FILENAME)] = {0};
 
